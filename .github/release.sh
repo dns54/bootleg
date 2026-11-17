@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 # Signs the capsule in ./result (nix build .#<board>-capsule) and writes the release files to
-# ./dist: the capsule, its fwupd cabinet, and the fwupd metadata with its .jcat.
+# ./dist: the capsule, its fwupd cabinet, the fwupd metadata with its .jcat, and the complete
+# source with the third-party licence notice.
 # Usage: release.sh <board>. Needs CAPSULE_SIGNER (signer key + certificate, PEM) and
 # GITHUB_REPOSITORY (owner/repo).
 set -euo pipefail
@@ -41,7 +42,7 @@ component() {
     <summary>coreboot firmware for the $board</summary>
     <description><p>coreboot and EDK2, built by bootleg.</p></description>
     <url type="homepage">https://github.com/$GITHUB_REPOSITORY</url>
-    <metadata_license>CC0-1.0</metadata_license>
+    <metadata_license>MIT</metadata_license>
     <project_license>GPL-2.0-only</project_license>
     <developer_name>bootleg</developer_name>
     <provides><firmware type="flashed">$guid</firmware></provides>
@@ -80,5 +81,11 @@ cp "dist/$cap" "$work/cab/firmware.bin"
   echo '</components>'
 } | zstd -q -o dist/firmware.xml.zst
 (cd dist && sign firmware.xml.zst.jcat firmware.xml.zst)
+
+name=bootleg-$board-$version-source
+src=$(nix build --no-link --print-out-paths ".#$board-capsule.source")
+tar -C "$src" -cf - --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$timestamp" \
+  --transform "s|^\.|$name|" . | xz -T0 -6 > "dist/$name.tar.xz"
+cp docs/third-party.md dist/THIRD-PARTY.md
 
 echo "$version" > dist/version

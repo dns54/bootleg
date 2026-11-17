@@ -144,4 +144,6 @@ The flash descriptor in `boards/*/blobs/` comes from Dell's stock firmware; boot
 license it.
 
 The firmware image itself contains coreboot (GPL-2.0-only), EDK2 (BSD-2-Clause-Patent), iPXE
-(GPL-2.0-or-later), and Intel FSP and microcode under Intel's licences.
+(GPL-2.0-or-later), and Intel FSP and microcode under Intel's licences. Each release includes the
+complete source it was built from; the components and their licences are listed in
+[docs/third-party.md](docs/third-party.md).

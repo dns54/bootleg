@@ -53,7 +53,7 @@ cabinet and metadata. To sign by hand with your own keys:
 nix build .#<board>-capsule
 CAPSULE_SIGNER="$(<signer.pem)" GITHUB_REPOSITORY=<owner>/<repo> \
   nix shell --inputs-from . nixpkgs#libjcat nixpkgs#gcab nixpkgs#zstd nixpkgs#python3 \
-  nixpkgs#openssl nixpkgs#jq -c .github/release.sh <board>
+  nixpkgs#openssl nixpkgs#jq nixpkgs#gnutar nixpkgs#xz -c .github/release.sh <board>
 ```
 
 - Chain: root (`keys/capsule-root.pem`, built into the ROM) → intermediate

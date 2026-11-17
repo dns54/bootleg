@@ -25,20 +25,54 @@
 }:
 
 let
-  src = inputs.coreboot;
   version = "${release}+g${rev}";
-  corebootVersion = "g${src.shortRev}";
+  corebootVersion = "g${inputs.coreboot.shortRev}";
+
+  # The complete source the firmware is built from, published with each release. The build below
+  # runs from this tree, so anything pruned here that the build needs makes it fail.
+  source = stdenvNoCC.mkDerivation {
+    name = "${pname}-source";
+    src = inputs.coreboot;
+
+    patches =
+      lib.filesystem.listFilesRecursive ../patches/coreboot
+      ++ lib.optionals (builtins.pathExists (board + "/patches")) (
+        lib.filesystem.listFilesRecursive (board + "/patches")
+      );
+
+    postPatch = ''
+      rm -r 3rdparty/intel-microcode
+      cp -r ${inputs.microcode} 3rdparty/intel-microcode
+
+      w=payloads/external/edk2/workspace/mrchromebox
+      mkdir -p $(dirname $w)
+      cp -r ${edk2} $w
+      cp -r ${edk2.ipxeSource} ipxe
+      cp ${../docs/third-party.md} THIRD-PARTY.md
+      chmod -R u+w .
+
+      # Not used by this build.
+      rm -r 3rdparty/{amd_blobs,arm-trusted-firmware,qc_blobs,opensbi,stm}
+      find 3rdparty/fsp -maxdepth 1 -name '*FspBinPkg' ! -name KabylakeFspBinPkg -exec rm -r {} +
+      # EDK2 checks that the include directories its .dec files declare exist, so keep those.
+      rm -r $w/SecurityPkg/DeviceSecurity/SpdmLib/libspdm/os_stub/{openssllib,mbedtlslib} \
+        $w/LvglPkg/Library/LvglLib/lvgl/{tests,docs,demos,examples} \
+        $w/CryptoPkg/Library/OpensslLib/openssl/{test,fuzz} \
+        $w/CryptoPkg/Library/MbedTlsLib/mbedtls/tests \
+        $w/MdeModulePkg/Library/BrotliCustomDecompressLib/brotli/tests
+    '';
+
+    dontConfigure = true;
+    dontBuild = true;
+    installPhase = "cp -r . $out";
+    dontFixup = true;
+  };
 in
 stdenvNoCC.mkDerivation {
   inherit pname;
   inherit version;
-  inherit src;
-
-  patches =
-    lib.filesystem.listFilesRecursive ../patches/coreboot
-    ++ lib.optionals (builtins.pathExists (board + "/patches")) (
-      lib.filesystem.listFilesRecursive (board + "/patches")
-    );
+  src = source;
+  passthru = { inherit source; };
 
   strictDeps = true;
   depsBuildBuild = [
@@ -54,13 +88,6 @@ stdenvNoCC.mkDerivation {
   enableParallelBuilding = true;
 
   postPatch = ''
-    rm -r 3rdparty/intel-microcode
-    cp -r ${inputs.microcode} 3rdparty/intel-microcode
-
-    mkdir -p payloads/external/edk2/workspace
-    cp -r ${edk2} payloads/external/edk2/workspace/mrchromebox
-    chmod -R u+w 3rdparty/intel-microcode payloads/external/edk2/workspace
-
     patchShebangs util payloads/external/edk2/workspace/mrchromebox/BaseTools
 
     cp ${descriptor} descriptor.bin

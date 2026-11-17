@@ -34,8 +34,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           nix shell --inputs-from . nixpkgs#libjcat nixpkgs#gcab nixpkgs#zstd nixpkgs#python3 \
-            nixpkgs#openssl nixpkgs#jq -c .github/release.sh optiplex-3050
+            nixpkgs#openssl nixpkgs#jq nixpkgs#gnutar nixpkgs#xz -c .github/release.sh optiplex-3050
           v=$(<dist/version)
           gh release create "$v" --target "$GITHUB_SHA" --title "bootleg $v" \
             --notes "Built from $GITHUB_SHA." \
-            dist/*.cap dist/*.cab dist/firmware.xml.zst dist/firmware.xml.zst.jcat
+            dist/*.cap dist/*.cab dist/firmware.xml.zst dist/firmware.xml.zst.jcat \
+            dist/*-source.tar.xz dist/THIRD-PARTY.md
