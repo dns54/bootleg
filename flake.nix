@@ -2,6 +2,11 @@
 {
   description = "bootleg: coreboot for servers and homelabs";
 
+  nixConfig = {
+    extra-substituters = [ "https://bootleg.cachix.org" ];
+    extra-trusted-public-keys = [ "bootleg.cachix.org-1:pZu08w/U/cxnjYWNxprVZRzpb8wf9vDBHfpWjxvMTZE=" ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     coreboot = {

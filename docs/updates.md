@@ -11,42 +11,56 @@
 
 ## fwupd
 
-<!-- TODO: remote config: releases/latest/download/firmware.xml.zst + .jcat -->
+Each push to `main` publishes a release: the signed capsule, its fwupd cabinet, and the
+metadata (`firmware.xml.zst` plus `.jcat`). fwupd trusts both once it has bootleg's root and
+intermediate certificates:
 
 ```sh
+for d in /etc/pki/fwupd /etc/pki/fwupd-metadata; do
+  sudo install -Dm644 -t $d keys/capsule-root.pem keys/capsule-intermediate.pem
+done
+sudo tee /etc/fwupd/remotes.d/bootleg.conf <<'EOF'
+[fwupd Remote]
+Enabled=true
+Title=bootleg
+MetadataURI=https://github.com/dns54/bootleg/releases/latest/download/firmware.xml.zst
+EOF
 fwupdmgr refresh
 fwupdmgr update
 ```
 
 ## Manual
 
-- Copy the capsule to `\EFI\UpdateCapsule\` on the ESP
-- Set bit 2 of `OsIndications`
-- Reboot
+Copy the capsule (`.cap` from the release) to `\EFI\UpdateCapsule\` on the ESP, set bit 2 of
+`OsIndications`, and reboot. With the ESP at `/boot`:
 
-<!-- TODO: commands -->
+```sh
+sudo install -Dm644 -t /boot/EFI/UpdateCapsule bootleg-*.cap
+v=/sys/firmware/efi/efivars/OsIndications-8be4df61-93ca-11d2-aa0d-00e098032b8c
+[ -e $v ] && sudo chattr -i $v
+printf '\x07\x00\x00\x00\x04\x00\x00\x00\x00\x00\x00\x00' | sudo tee $v > /dev/null
+sudo reboot
+```
 
 - EDK2 finds the ESP through the first active boot entry: it must name a file on the ESP
 
 ## Signing
 
-Sign with EDK2's `GenerateCapsule.py` (`BaseTools/Source/Python/Capsule/` in an EDK2 checkout).
-The GUID and version must match the ROM, so take them from the build output:
+CI signs with `.github/release.sh`, which runs EDK2's `GenerateCapsule.py` and builds the
+cabinet and metadata. To sign by hand with your own keys:
 
 ```sh
 nix build .#<board>-capsule
-v=$(<result/capsule-version)
-PYTHONPATH=edk2/BaseTools/Source/Python python3 \
-  edk2/BaseTools/Source/Python/Capsule/GenerateCapsule.py --encode --output out.cap \
-  --guid "$(<result/capsule-guid)" --capflag PersistAcrossReset \
-  --fw-version "$v" --lsv "$v" \
-  --signer-private-cert signer.pem --other-public-cert intermediate.pub.pem \
-  --trusted-public-cert root.pub.pem \
-  result/coreboot.rmap.rom
+CAPSULE_SIGNER="$(<signer.pem)" GITHUB_REPOSITORY=<owner>/<repo> \
+  nix shell --inputs-from . nixpkgs#libjcat nixpkgs#gcab nixpkgs#zstd nixpkgs#python3 \
+  nixpkgs#openssl nixpkgs#jq -c .github/release.sh <board>
 ```
 
-- The ROM trusts `keys/capsule-root.pem`
-- Private keys stay outside the repo
+- Chain: root (`keys/capsule-root.pem`, built into the ROM) → intermediate
+  (`keys/capsule-intermediate.pem`) → signer, which signs both the capsule and the fwupd files
+- `signer.pem` holds the signer key and certificate. CI has it as the `CAPSULE_SIGNER` secret
+- The root and intermediate keys stay offline. A leaked signer is replaced with a new one from the
+  intermediate, without a reflash
 
 ## Risks and limits
 

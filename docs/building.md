@@ -23,7 +23,8 @@ Each `boards/<board>/` has two outputs.
 
 ## Full image
 
-- Pulls the cached ME-less build
+- Pulls the cached ME-less build from `bootleg.cachix.org` (the flake's `nixConfig`; Nix asks
+  before using it, or pass `--accept-flake-config`)
 - Fetches the ME donor
 - Runs me_cleaner and deguard
 - Checks: ME hash, both regions, descriptor locks
