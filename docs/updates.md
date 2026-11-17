@@ -64,5 +64,7 @@ CAPSULE_SIGNER="$(<signer.pem)" GITHUB_REPOSITORY=<owner>/<repo> \
 
 ## Risks and limits
 
+- A ROM built from your own commit has that commit's date as its version. Releases from older
+  commits aren't offered until upstream commits after it; flash a release to get back on track
 - One firmware copy: power loss during the write (about one minute) needs an external programmer
 - Not by capsule: flash layout, descriptor, ME. Use internal flashing with BIOS Lock off, or external
