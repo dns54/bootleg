@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
-# Weekly flake.lock update. Builds first and opens a pull request only if the build passes; a
-# failed run means a patch no longer applies or the build broke upstream.
+# Weekly flake.lock update. Opens one pull request, or refreshes the open one, with what changed;
+# the build workflow then runs on it as the pull request's check.
 name: update-lock
 
 on:
@@ -12,20 +12,25 @@ jobs:
   update:
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
-      - uses: cachix/cachix-action@v16
-        with:
-          name: bootleg
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      - run: nix flake update
-      - run: nix build -L .#optiplex-3050-capsule
-      - uses: peter-evans/create-pull-request@v7
+      - run: |
+          cp flake.lock /tmp/old.lock
+          nix flake update
+          .github/lock-changes.sh /tmp/old.lock flake.lock > /tmp/body.md
+      - id: pr
+        uses: peter-evans/create-pull-request@v7
         with:
           branch: update-lock
           commit-message: "flake.lock: Update"
           title: "flake.lock: Update"
-          body: The capsule builds with the new inputs. Drop patches upstream now contains before merging.
+          body-path: /tmp/body.md
+      # Pull requests opened with the workflow's token don't start workflows themselves.
+      - if: steps.pr.outputs.pull-request-head-sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build.yml --ref update-lock
