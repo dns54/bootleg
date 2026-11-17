@@ -1,0 +1,225 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 03:54:40 +0200
+Subject: [PATCH 04/25] SecurityPkg/Tcg2Dxe: Measure coreboot's setup options
+ into PCR[1]
+
+coreboot's setup options (VT-d, BIOS Lock, power and PCIe settings and
+so on) are stored as EFI variables in gEficorebootNvDataGuid, but nothing
+measures them, so changing one leaves every PCR unchanged.
+
+At the first ReadyToBoot, measure each of them into PCR[1] as an
+EV_EFI_VARIABLE_DRIVER_CONFIG event, in name order so the result doesn't
+depend on the order they were written in. Skip volatile ones: coreboot
+sets those on every boot to report state (boot_alerts), so they would
+change the PCR after a thermal trip or with a dead RTC battery. Tools
+that read the event log already understand this event type.
+
+Based on Dasharo's "SecurityPkg: measure Dasharo variables before boot"
+(Sergii Dmytruk), which measures Dasharo's own variables with a vendor
+event type.
+
+Link: https://github.com/Dasharo/edk2/commit/0bceb4df2a62633d454239396f0e19abe2c9ea5b
+Co-developed-by: Sergii Dmytruk <sergii.dmytruk@3mdeb.com>
+Signed-off-by: Sergii Dmytruk <sergii.dmytruk@3mdeb.com>
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ SecurityPkg/Tcg/Tcg2Dxe/Tcg2Dxe.c   | 155 ++++++++++++++++++++++++++++
+ SecurityPkg/Tcg/Tcg2Dxe/Tcg2Dxe.inf |   4 +
+ 2 files changed, 159 insertions(+)
+
+diff --git a/SecurityPkg/Tcg/Tcg2Dxe/Tcg2Dxe.c b/SecurityPkg/Tcg/Tcg2Dxe/Tcg2Dxe.c
+index 9c9812b4d1..d6203053c6 100644
+--- a/SecurityPkg/Tcg/Tcg2Dxe/Tcg2Dxe.c
++++ b/SecurityPkg/Tcg/Tcg2Dxe/Tcg2Dxe.c
+@@ -2301,6 +2301,156 @@ ReadAndMeasureSecureVariable (
+            );
+ }
+ 
++/**
++  Compare two variable names, for QuickSort().
++**/
++STATIC
++INTN
++EFIAPI
++CompareVariableNames (
++  IN CONST VOID  *Name1,
++  IN CONST VOID  *Name2
++  )
++{
++  return StrCmp (*(CHAR16 *CONST *)Name1, *(CHAR16 *CONST *)Name2);
++}
++
++/**
++  Measure coreboot's setup options into PCR[1], so changing one changes the PCR.
++
++  They are the non-volatile variables in gEficorebootNvDataGuid, one per
++  option. They are measured in name order, so the PCR value doesn't depend on
++  the order they were written in.
++
++  @retval EFI_SUCCESS           Operation completed successfully.
++  @retval EFI_OUT_OF_RESOURCES  Out of memory.
++  @retval EFI_DEVICE_ERROR      The operation was unsuccessful.
++**/
++STATIC
++EFI_STATUS
++MeasureCorebootOptions (
++  VOID
++  )
++{
++  EFI_STATUS  Status;
++  CHAR16      *Name;
++  UINTN       NameBufferSize;
++  UINTN       NameSize;
++  EFI_GUID    Guid;
++  UINT32      Attributes;
++  CHAR16      **Names;
++  UINTN       Count;
++  UINTN       Capacity;
++  UINTN       Index;
++  VOID        *Data;
++  UINTN       DataSize;
++  VOID        *NewBuffer;
++  CHAR16      *SortBuffer;
++
++  NameBufferSize = 64 * sizeof (CHAR16);
++  Name           = AllocateZeroPool (NameBufferSize);
++  Capacity       = 32;
++  Names          = AllocatePool (Capacity * sizeof (*Names));
++  Count          = 0;
++  Status         = EFI_OUT_OF_RESOURCES;
++  if ((Name == NULL) || (Names == NULL)) {
++    goto Done;
++  }
++
++  while (TRUE) {
++    NameSize = NameBufferSize;
++    Status   = gRT->GetNextVariableName (&NameSize, Name, &Guid);
++    if (Status == EFI_BUFFER_TOO_SMALL) {
++      NewBuffer = ReallocatePool (NameBufferSize, NameSize, Name);
++      if (NewBuffer == NULL) {
++        Status = EFI_OUT_OF_RESOURCES;
++        break;
++      }
++
++      Name           = NewBuffer;
++      NameBufferSize = NameSize;
++      Status         = gRT->GetNextVariableName (&NameSize, Name, &Guid);
++    }
++
++    if (EFI_ERROR (Status)) {
++      break;
++    }
++
++    if (!CompareGuid (&Guid, &gEficorebootNvDataGuid)) {
++      continue;
++    }
++
++    //
++    // Skip volatile values: coreboot rewrites them on every boot to report state
++    // (boot_alerts), which would change the PCR with no setting changed.
++    //
++    DataSize   = 0;
++    Attributes = 0;
++    if ((gRT->GetVariable (Name, &Guid, &Attributes, &DataSize, NULL) == EFI_BUFFER_TOO_SMALL) &&
++        ((Attributes & EFI_VARIABLE_NON_VOLATILE) == 0))
++    {
++      continue;
++    }
++
++    if (Count == Capacity) {
++      NewBuffer = ReallocatePool (Capacity * sizeof (*Names), 2 * Capacity * sizeof (*Names), Names);
++      if (NewBuffer == NULL) {
++        Status = EFI_OUT_OF_RESOURCES;
++        break;
++      }
++
++      Names     = NewBuffer;
++      Capacity *= 2;
++    }
++
++    Names[Count] = AllocateCopyPool (StrSize (Name), Name);
++    if (Names[Count] == NULL) {
++      Status = EFI_OUT_OF_RESOURCES;
++      break;
++    }
++
++    Count++;
++  }
++
++  //
++  // EFI_NOT_FOUND means every variable was seen.
++  //
++  if (Status != EFI_NOT_FOUND) {
++    goto Done;
++  }
++
++  Status = EFI_SUCCESS;
++  QuickSort (Names, Count, sizeof (*Names), CompareVariableNames, &SortBuffer);
++  for (Index = 0; Index < Count && !EFI_ERROR (Status); Index++) {
++    Status = ReadAndMeasureVariable (
++               1,
++               EV_EFI_VARIABLE_DRIVER_CONFIG,
++               Names[Index],
++               &gEficorebootNvDataGuid,
++               &DataSize,
++               &Data
++               );
++    if (Data != NULL) {
++      FreePool (Data);
++    }
++  }
++
++Done:
++  if (Names != NULL) {
++    for (Index = 0; Index < Count; Index++) {
++      FreePool (Names[Index]);
++    }
++
++    FreePool (Names);
++  }
++
++  if (Name != NULL) {
++    FreePool (Name);
++  }
++
++  return Status;
++}
++
+ /**
+   Measure and log all EFI boot variables, and extend the measurement result into a specific PCR.
+ 
+@@ -2562,6 +2712,11 @@ OnReadyToBoot (
+       DEBUG ((DEBUG_ERROR, "Boot Variables not Measured. Error!\n"));
+     }
+ 
++    Status = MeasureCorebootOptions ();
++    if (EFI_ERROR (Status)) {
++      DEBUG ((DEBUG_ERROR, "coreboot options not Measured. Error!\n"));
++    }
++
+     //
+     // 1. This is the first boot attempt.
+     //
+diff --git a/SecurityPkg/Tcg/Tcg2Dxe/Tcg2Dxe.inf b/SecurityPkg/Tcg/Tcg2Dxe/Tcg2Dxe.inf
+index cd984dea2c..64727cb80a 100644
+--- a/SecurityPkg/Tcg/Tcg2Dxe/Tcg2Dxe.inf
++++ b/SecurityPkg/Tcg/Tcg2Dxe/Tcg2Dxe.inf
+@@ -45,6 +45,7 @@
+   MdeModulePkg/MdeModulePkg.dec
+   SecurityPkg/SecurityPkg.dec
+   CryptoPkg/CryptoPkg.dec
++  UefiPayloadPkg/UefiPayloadPkg.dec
+ 
+ [LibraryClasses]
+   MemoryAllocationLib
+@@ -73,6 +74,9 @@
+   ## SOMETIMES_CONSUMES     ## Variable:L"BootXXXX"
+   gEfiGlobalVariableGuid
+ 
++  ## SOMETIMES_CONSUMES     ## Variable:coreboot setup options
++  gEficorebootNvDataGuid
++
+   ## SOMETIMES_CONSUMES      ## Variable:L"db"
+   ## SOMETIMES_CONSUMES      ## Variable:L"dbx"
+   gEfiImageSecurityDatabaseGuid

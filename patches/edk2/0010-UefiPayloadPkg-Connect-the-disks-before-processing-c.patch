@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 05:46:51 +0200
+Subject: [PATCH 10/25] UefiPayloadPkg: Connect the disks before processing
+ capsules on disk
+
+DxeCapsuleLibFmp finds capsules on disk through the active boot option,
+whose device path is usually a short-form HD() node, as efibootmgr and OS
+installers create it. Before the consoles are connected that path doesn't
+resolve, so the first ProcessCapsules() pass finds no capsule. The second
+pass finds and removes the file, but FmpDxe has locked the firmware
+device at EndOfDxe by then and the update fails.
+
+Connect all devices before the first pass when the OS asked for capsules
+on disk. This is what EDK2's PcdCapsuleOnDiskConnectBootDevice is for,
+which MrChromebox's tree doesn't have. Third-party images stay deferred
+until EndOfDxe, so only firmware drivers run.
+
+Drop this, and coreboot's "payloads/external/edk2: Don't set
+PcdCapsuleOnDiskConnectBootDevice", once this tree defines the PCD.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../PlatformBootManagerLib/PlatformBootManager.c      | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+index cdfd97bd3a..7a9d7f0794 100644
+--- a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+@@ -477,6 +477,17 @@ PlatformBootManagerBeforeConsole (
+ 
+     BootSplashApply ();
+ 
++    //
++    // Capsules on disk are read from the ESP of the active boot option, which
++    // is usually a short-form HD() path that only resolves once the disks are
++    // connected. This first pass is the one that can still update the
++    // firmware: FmpDxe locks it at EndOfDxe. Third-party images (option ROMs)
++    // stay deferred until EndOfDxe, so only built-in drivers run here.
++    //
++    if (CoDCheckCapsuleOnDiskFlag ()) {
++      EfiBootManagerConnectAll ();
++    }
++
+     Status = ProcessCapsules ();
+     if (EFI_ERROR (Status)) {
+       DEBUG ((DEBUG_ERROR, "%a(): ProcessCapsule() failed with: %r\n", __func__, Status));

@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 23:56:30 +0200
+Subject: [PATCH 16/29] payloads/edk2: Use a pre-populated tree that is not a
+ git checkout
+
+The EDK2 rule always fetches and checks out a git revision, which
+fails in sandboxed builds without network access, such as Nix. If
+the tree in the workspace has no .git, use it as is.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ payloads/external/edk2/Makefile | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/payloads/external/edk2/Makefile b/payloads/external/edk2/Makefile
+index 9b15ed6bf6..768bce5320 100644
+--- a/payloads/external/edk2/Makefile
++++ b/payloads/external/edk2/Makefile
+@@ -287,6 +287,7 @@ $(EDK2_PATH): $(WORKSPACE)
+ 		git clone --recurse-submodules $(CONFIG_EDK2_REPOSITORY) $(EDK2_PATH) -j5; \
+ 	fi
+ 	cd $(EDK2_PATH); \
++		[ -e .git ] || exit 0; \
+ 		git checkout MdeModulePkg/Logo/Logo.bmp > /dev/null 2>&1 || true; \
+ 		echo "    Fetching new commits from $(CONFIG_EDK2_REPOSITORY)"; \
+ 		git fetch origin 2>/dev/null; \

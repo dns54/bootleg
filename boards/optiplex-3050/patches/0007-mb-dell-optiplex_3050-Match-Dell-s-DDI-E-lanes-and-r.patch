@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 21:18:19 +0200
+Subject: [PATCH 07/12] mb/dell/optiplex_3050: Match Dell's DDI E lanes and
+ root port settings
+
+Dell's VBT lists a DisplayPort output on DDI E, probably the optional
+video port module. coreboot gives all four DDI A lanes to DDI A, so
+Linux finds DDI E with no lanes and warns with a stack trace:
+
+  i915 0000:00:02.0: [drm] Not enough lanes (0) for DP on [ENCODER:131:DDI E/PHY E]
+
+Split the lanes between DDI A and DDI E. DDI A drives an internal eDP
+panel, which this desktop doesn't have; the HDMI and DP ports are on
+DDI B and C and don't change.
+
+Dell's firmware also enables LTR and Advanced Error Reporting on all
+three root ports it uses (RP5 for the Realtek LAN, RP8 for the M.2 WLAN
+slot and RP21 for the M.2 SSD); the port only enables them on RP21.
+Without LTR on its root port, a device can't report its latency
+tolerance: Linux enables LTR on a device only when the port above it
+supports it, and the PMC then can't let the package into deeper C
+states while the link is idle. Without AER, the OS gets no PCIe error
+reports from the two slots. Enable both on RP5 and RP8.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/mainboard/dell/sklkbl_desktops/Kconfig                    | 1 +
+ .../sklkbl_desktops/variants/optiplex_3050/overridetree.cb    | 4 ++++
+ 2 files changed, 5 insertions(+)
+
+diff --git a/src/mainboard/dell/sklkbl_desktops/Kconfig b/src/mainboard/dell/sklkbl_desktops/Kconfig
+index 25afbeb2e6..ea386f420d 100644
+--- a/src/mainboard/dell/sklkbl_desktops/Kconfig
++++ b/src/mainboard/dell/sklkbl_desktops/Kconfig
+@@ -23,6 +23,7 @@ config BOARD_DELL_SKLKBL_DESKTOPS_COMMON
+ config BOARD_DELL_OPTIPLEX_3050
+ 	bool
+ 	select BOARD_DELL_SKLKBL_DESKTOPS_COMMON
++	select SOC_INTEL_GFX_ENABLE_DDI_E_BIFURCATION
+ 	select MAINBOARD_HAS_TPM2
+ 	select MEMORY_MAPPED_TPM
+ 
+diff --git a/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/overridetree.cb b/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/overridetree.cb
+index c762c4fe3f..3761b4ffc6 100644
+--- a/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/overridetree.cb
++++ b/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/overridetree.cb
+@@ -31,12 +31,16 @@ chip soc/intel/skylake
+ 		device ref pcie_rp5 on
+ 			register "PcieRpClkReqSupport[4]"		= "false"
+ 			register "PcieRpHotPlug[4]"			= "0"
++			register "PcieRpAdvancedErrorReporting[4]"	= "1"
++			register "PcieRpLtrEnable[4]"			= "true"
+ 		end
+ 
+ 		# M.2 WiFi
+ 		device ref pcie_rp8 on
+ 			register "PcieRpClkReqSupport[7]"		= "false"
+ 			register "PcieRpHotPlug[7]"			= "0"
++			register "PcieRpAdvancedErrorReporting[7]"	= "1"
++			register "PcieRpLtrEnable[7]"			= "true"
+ 		end
+ 
+ 		# M.2 SSD

@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 04:06:49 +0200
+Subject: [PATCH 17/29] payloads/external/edk2: Don't set
+ PcdCapsuleOnDiskConnectBootDevice
+
+Commit a2b77d9b03 ("payloads/external/edk2: Connect boot device for
+disk capsules") sets this PCD with capsule-on-disk support, but
+MrChromebox's EDK2 doesn't define it, so the payload build fails with
+"The Pcd ... is not found in the DEC file".
+
+Don't set it. MrChromebox's capsule-on-disk code still connects the
+device path of the active boot option to find the ESP, which works when
+that option names a file on the ESP, as installed bootloaders do.
+
+MrChromebox's EDK2 needs "UefiPayloadPkg: Connect the disks before
+processing capsules on disk" instead. Drop both once it defines the PCD.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ payloads/external/edk2/Makefile | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/payloads/external/edk2/Makefile b/payloads/external/edk2/Makefile
+index 768bce5320..7515db5ec9 100644
+--- a/payloads/external/edk2/Makefile
++++ b/payloads/external/edk2/Makefile
+@@ -152,7 +152,6 @@ BUILD_STR += --pcd gEfiMdeModulePkgTokenSpaceGuid.PcdCapsuleEmbeddedDriverSuppor
+ endif
+ ifeq ($(CONFIG_DRIVERS_EFI_CAPSULE_ON_DISK_SUPPORT),y)
+ BUILD_STR += --pcd gEfiMdeModulePkgTokenSpaceGuid.PcdCapsuleOnDiskSupport=TRUE
+-BUILD_STR += --pcd gEfiMdeModulePkgTokenSpaceGuid.PcdCapsuleOnDiskConnectBootDevice=TRUE
+ endif
+ ifeq ($(CONFIG_DRIVERS_EFI_CAPSULE_EMBED_FMP_DXE),y)
+ BUILD_STR += -D CAPSULE_EMBED_FMP_DXE=TRUE

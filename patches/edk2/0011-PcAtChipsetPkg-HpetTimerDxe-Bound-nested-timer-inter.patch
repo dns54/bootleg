@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 19:00:28 +0200
+Subject: [PATCH 11/25] PcAtChipsetPkg/HpetTimerDxe: Bound nested timer
+ interrupts
+
+The timer notify function runs DXE event notifications with interrupts
+enabled, after the HPET interrupt has already been acknowledged. When
+the notifications take longer than a timer period, which happens under
+emulation or when an SMI delays the CPU, the next HPET interrupt nests
+inside the previous one. The nesting has no limit: with the 128 KiB DXE
+stack the payload overflowed into the page tables below it and stopped
+with a page fault in CpuDxe. Under QEMU without KVM the handler nested
+128 levels deep while the firmware sat in its setup screen.
+
+Use OvmfPkg's NestedInterruptTplLib, as OvmfPkg/LocalApicTimerDxe does.
+It defers the inner handler's RestoreTPL() to the outer one, so the
+number of nested handler frames is bounded by the number of TPLs.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ PcAtChipsetPkg/HpetTimerDxe/HpetTimer.c      | 24 ++++++++++++--------
+ PcAtChipsetPkg/HpetTimerDxe/HpetTimerDxe.inf |  2 ++
+ UefiPayloadPkg/UefiPayloadPkg.dsc            |  5 +++-
+ 3 files changed, 21 insertions(+), 10 deletions(-)
+
+diff --git a/PcAtChipsetPkg/HpetTimerDxe/HpetTimer.c b/PcAtChipsetPkg/HpetTimerDxe/HpetTimer.c
+index e74777fbc6..b82423f0f6 100644
+--- a/PcAtChipsetPkg/HpetTimerDxe/HpetTimer.c
++++ b/PcAtChipsetPkg/HpetTimerDxe/HpetTimer.c
+@@ -18,6 +18,7 @@
+ #include <Library/UefiBootServicesTableLib.h>
+ #include <Library/LocalApicLib.h>
+ #include <Library/IoApicLib.h>
++#include <Library/NestedInterruptTplLib.h>
+ 
+ #include <Register/LocalApic.h>
+ #include <Register/IoApic.h>
+@@ -292,10 +293,14 @@ TimerInterruptHandler (
+   IN EFI_SYSTEM_CONTEXT  SystemContext
+   )
+ {
+-  UINT64  MainCounter;
+-  UINT64  Comparator;
+-  UINT64  TimerPeriod;
+-  UINT64  Delta;
++  STATIC NESTED_INTERRUPT_STATE  NestedInterruptState;
++  EFI_TPL                        OriginalTPL;
++  UINT64                         MainCounter;
++  UINT64                         Comparator;
++  UINT64                         TimerPeriod;
++  UINT64                         Delta;
++
++  OriginalTPL = NestedInterruptRaiseTPL ();
+ 
+   //
+   // Count number of ticks
+@@ -398,13 +403,14 @@ TimerInterruptHandler (
+     // interrupt in 100 ns units.
+     //
+     mTimerNotifyFunction (TimerPeriod);
+-    return;
++  } else {
++    //
++    // Save main counter value
++    //
++    mPreviousMainCounter = MainCounter;
+   }
+ 
+-  //
+-  // Save main counter value
+-  //
+-  mPreviousMainCounter = MainCounter;
++  NestedInterruptRestoreTPL (OriginalTPL, SystemContext, &NestedInterruptState);
+ }
+ 
+ /**
+diff --git a/PcAtChipsetPkg/HpetTimerDxe/HpetTimerDxe.inf b/PcAtChipsetPkg/HpetTimerDxe/HpetTimerDxe.inf
+index 125eea0aab..b77638f575 100644
+--- a/PcAtChipsetPkg/HpetTimerDxe/HpetTimerDxe.inf
++++ b/PcAtChipsetPkg/HpetTimerDxe/HpetTimerDxe.inf
+@@ -27,6 +27,7 @@
+ 
+ [Packages]
+   MdePkg/MdePkg.dec
++  OvmfPkg/OvmfPkg.dec
+   UefiCpuPkg/UefiCpuPkg.dec
+   PcAtChipsetPkg/PcAtChipsetPkg.dec
+ 
+@@ -39,6 +40,7 @@
+   BaseLib
+   LocalApicLib
+   IoApicLib
++  NestedInterruptTplLib
+ 
+ [Protocols]
+   gEfiTimerArchProtocolGuid                     ## PRODUCES
+diff --git a/UefiPayloadPkg/UefiPayloadPkg.dsc b/UefiPayloadPkg/UefiPayloadPkg.dsc
+index 0b1f70cfff..c89411c14b 100644
+--- a/UefiPayloadPkg/UefiPayloadPkg.dsc
++++ b/UefiPayloadPkg/UefiPayloadPkg.dsc
+@@ -1541,7 +1541,10 @@
+   UefiCpuPkg/CpuDxe/CpuDxe.inf
+ 
+ !if $(TIMER_SUPPORT) == "HPET"
+-  PcAtChipsetPkg/HpetTimerDxe/HpetTimerDxe.inf
++  PcAtChipsetPkg/HpetTimerDxe/HpetTimerDxe.inf {
++    <LibraryClasses>
++      NestedInterruptTplLib|OvmfPkg/Library/NestedInterruptTplLib/NestedInterruptTplLib.inf
++  }
+ !elseif $(TIMER_SUPPORT) == "LAPIC"
+   OvmfPkg/LocalApicTimerDxe/LocalApicTimerDxe.inf {
+     <LibraryClasses>

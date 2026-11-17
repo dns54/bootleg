@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 19:39:14 +0200
+Subject: [PATCH 19/29] soc/intel/common/block/smm: Reset when a TCO watchdog
+ expires
+
+With the TCO SMI enabled (selected by BOOTMEDIA_SMM_BWP and
+BOOTMEDIA_SMM_BWP_RUNTIME_OPTION), a TCO timeout raises an SMI, and the
+handler clears all TCO status bits, TIMEOUT included. The PCH resets the
+system only when the timer expires a second time with TIMEOUT still set,
+so a running TCO watchdog never resets the system once SMM is up.
+
+When the TIMEOUT SMI comes from a running timer, reset right away
+instead, one timeout earlier than the hardware would. ACPI_WDAT_WDT
+already keeps TIMEOUT set for the second timeout, so leave it alone.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/soc/intel/common/block/smm/smihandler.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/soc/intel/common/block/smm/smihandler.c b/src/soc/intel/common/block/smm/smihandler.c
+index 5ca77ee9d7..7cabe696ab 100644
+--- a/src/soc/intel/common/block/smm/smihandler.c
++++ b/src/soc/intel/common/block/smm/smihandler.c
+@@ -3,6 +3,7 @@
+ #include <arch/hlt.h>
+ #include <arch/io.h>
+ #include <boot_device.h>
++#include <cf9_reset.h>
+ #include <console/console.h>
+ #include <cpu/x86/cache.h>
+ #include <cpu/x86/msr.h>
+@@ -32,6 +33,7 @@
+ #include <soc/pci_devs.h>
+ #include <soc/pm.h>
+ #include <soc/gpio.h>
++#include <soc/intel/common/tco.h>
+ #include <soc/iomap.h>
+ #include <soc/smbus.h>
+ #include <spi-generic.h>
+@@ -523,6 +525,15 @@ void smihandler_southbridge_tco(
+ 	if (tco_sts & TCO1_STS_TIMEOUT) { /* TIMEOUT */
+ 		/* Handle TCO timeout */
+ 		printk(BIOS_DEBUG, "TCO Timeout.\n");
++		/*
++		 * Clearing TIMEOUT above keeps the second timeout, the one that resets the
++		 * system, from ever happening. A running timer is a watchdog that expired:
++		 * reset now, as the hardware would have one timeout later.
++		 */
++		if (!CONFIG(ACPI_WDAT_WDT) && !(tco_read_reg(TCO1_CNT) & TCO1_TMR_HLT)) {
++			printk(BIOS_CRIT, "TCO watchdog expired, resetting\n");
++			system_reset();
++		}
+ 	}
+ 
+ 	if (tco_sts & (TCO2_INTRD_DET << 16)) { /* INTRUDER# assertion */

@@ -1,0 +1,377 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 03:01:14 +0200
+Subject: [PATCH 12/25] UefiPayloadPkg: Add iPXE as the network driver, behind
+ a setup option
+
+EDK2 has no drivers for most NICs. The closed Realtek and ASIX UEFI
+drivers, loaded from CBFS, cover only those vendors, and NETWORK_IPXE
+adds iPXE as a boot application, not as a driver for EDK2's network
+stack.
+
+Add NETWORK_IPXE_DRIVER: iPXE built as a UEFI driver (ipxe.efidrv),
+placed in UefiPayloadPkg/NetworkDrivers by the build. It produces the
+Simple Network Protocol for every NIC iPXE supports (Realtek, Intel
+I210 to I226, virtio, e1000 and more), and EDK2's own network stack
+creates the UEFI PXE boot entries on top, as with a vendor driver.
+Build it with EFI_DOWNGRADE_UX (iPXE's config/general.h). Otherwise
+iPXE also installs its own LoadFile on each NIC, which adds a second
+network boot option per NIC that boots iPXE's own stack.
+
+With a NIC driver, every NIC gets the network stack: PXE boot options,
+and the network setup pages (Network Device List, IPv4/IPv6/VLAN
+configuration). Dell's firmware has them only when "Enable UEFI Network
+Stack" is on, which is off by default, so a machine without an OS opens
+setup instead of waiting on the network. Make the NIC driver depend on
+a protocol that the boot manager installs only when the network_stack
+option (coreboot CFR) is on. It installs it before connecting the
+devices, whose dispatch then loads the driver.
+
+Also install EDKII_PLATFORM_BOOT_MANAGER_PROTOCOL and drop network boot
+options while the option is off, which covers a NIC with its own UEFI
+option ROM.
+
+The option is read with a new CfrHelpersLib function,
+CfrOptionGetUint32(): the option's variable if set, otherwise its CFR
+default.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../Include/Library/CfrHelpersLib.h           |  16 +++
+ .../Library/CfrHelpersLib/CfrHelpersLib.c     |  47 ++++++++
+ .../Library/CfrHelpersLib/CfrHelpersLib.inf   |   3 +
+ .../PlatformBootManager.c                     | 102 ++++++++++++++++++
+ .../PlatformBootManager.h                     |   2 +
+ .../PlatformBootManagerLib.inf                |   3 +
+ UefiPayloadPkg/UefiPayloadPkg.dec             |   4 +
+ UefiPayloadPkg/UefiPayloadPkg.dsc             |  13 +++
+ UefiPayloadPkg/UefiPayloadPkg.fdf             |   6 ++
+ 9 files changed, 196 insertions(+)
+
+diff --git a/UefiPayloadPkg/Include/Library/CfrHelpersLib.h b/UefiPayloadPkg/Include/Library/CfrHelpersLib.h
+index e05268e3f2..a5d3112195 100644
+--- a/UefiPayloadPkg/Include/Library/CfrHelpersLib.h
++++ b/UefiPayloadPkg/Include/Library/CfrHelpersLib.h
+@@ -50,4 +50,20 @@ CfrOptionGetDefaultValue (
+   IN OUT UINTN  *DefaultValueLength  OPTIONAL
+   );
+ 
++/**
++  Return the value of a numeric or boolean option: its variable if one is set, otherwise its CFR
++  default, otherwise Default. Reads the variable through gRT, so DXE and later only.
++
++  @param[in]  OptionName  The option's name, which is also the name of its variable.
++  @param[in]  Default     The value when there is neither a variable nor a CFR default.
++
++  @return The option's value.
++**/
++UINT32
++EFIAPI
++CfrOptionGetUint32 (
++  IN CHAR8   *OptionName,
++  IN UINT32  Default
++  );
++
+ #endif
+diff --git a/UefiPayloadPkg/Library/CfrHelpersLib/CfrHelpersLib.c b/UefiPayloadPkg/Library/CfrHelpersLib/CfrHelpersLib.c
+index f8f4271808..8a937b3410 100644
+--- a/UefiPayloadPkg/Library/CfrHelpersLib/CfrHelpersLib.c
++++ b/UefiPayloadPkg/Library/CfrHelpersLib/CfrHelpersLib.c
+@@ -8,13 +8,19 @@
+ 
+ #include <Uefi/UefiBaseType.h>
+ #include <Uefi/UefiMultiPhase.h>
++#include <Uefi/UefiSpec.h>
+ #include <Pi/PiMultiPhase.h>
+ #include <Library/BaseLib.h>
++#include <Library/BaseMemoryLib.h>
+ #include <Library/CfrHelpersLib.h>
+ #include <Library/DebugLib.h>
+ #include <Library/HobLib.h>
++#include <Library/UefiRuntimeServicesTableLib.h>
+ #include <Guid/CfrSetupMenuGuid.h>
+ 
++// Longest option name CfrOptionGetUint32() looks up, with its terminator
++#define CFR_OPTION_NAME_MAX  64
++
+ /**
+   CFR_VARBINARY records are variable-length, so they aren't formal fields.
+   Implement this handling by returning the struct at this offset.
+@@ -168,3 +174,44 @@ CfrOptionGetDefaultValue (
+ 
+   return EFI_NOT_FOUND;
+ }
++
++/**
++  Return the value of a numeric or boolean option: its variable if one is set, otherwise its CFR
++  default, otherwise Default. Reads the variable through gRT, so DXE and later only.
++
++  @param[in]  OptionName  The option's name, which is also the name of its variable.
++  @param[in]  Default     The value when there is neither a variable nor a CFR default.
++
++  @return The option's value.
++**/
++UINT32
++EFIAPI
++CfrOptionGetUint32 (
++  IN CHAR8   *OptionName,
++  IN UINT32  Default
++  )
++{
++  CHAR16  VariableName[CFR_OPTION_NAME_MAX];
++  UINT32  Value;
++  UINTN   Size;
++  VOID    *DefaultValue;
++
++  if (!EFI_ERROR (AsciiStrToUnicodeStrS (OptionName, VariableName, ARRAY_SIZE (VariableName)))) {
++    Value = 0;
++    Size  = sizeof (Value);
++    if (!EFI_ERROR (gRT->GetVariable (VariableName, &gEficorebootNvDataGuid, NULL, &Size, &Value))) {
++      return Value;
++    }
++  }
++
++  Size = 0;
++  if (!EFI_ERROR (CfrOptionGetDefaultValue (NULL, OptionName, &DefaultValue, &Size)) &&
++      (Size >= 1) && (Size <= sizeof (Value)))
++  {
++    Value = 0;
++    CopyMem (&Value, DefaultValue, Size);
++    return Value;
++  }
++
++  return Default;
++}
+diff --git a/UefiPayloadPkg/Library/CfrHelpersLib/CfrHelpersLib.inf b/UefiPayloadPkg/Library/CfrHelpersLib/CfrHelpersLib.inf
+index dce88b4cf0..8d580edb66 100644
+--- a/UefiPayloadPkg/Library/CfrHelpersLib/CfrHelpersLib.inf
++++ b/UefiPayloadPkg/Library/CfrHelpersLib/CfrHelpersLib.inf
+@@ -23,8 +23,11 @@
+ 
+ [LibraryClasses]
+   BaseLib
++  BaseMemoryLib
+   DebugLib
+   HobLib
++  UefiRuntimeServicesTableLib
+ 
+ [Guids]
+   gEfiCfrSetupMenuFormGuid
++  gEficorebootNvDataGuid
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+index 7a9d7f0794..e125480f9b 100644
+--- a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+@@ -413,6 +413,83 @@ PlatformRegisterBootManagerEntryNotifyCallback (
+   }
+ }
+ 
++/**
++  Adjust the boot options the boot manager enumerates. Network boot options exist only while the
++  "Enable UEFI Network Stack" setup option is on.
++
++  @param[in]  BootOptions              The enumerated boot options.
++  @param[in]  BootOptionsCount         Number of enumerated boot options.
++  @param[out] UpdatedBootOptions       The adjusted boot options.
++  @param[out] UpdatedBootOptionsCount  Number of adjusted boot options.
++
++  @retval EFI_SUCCESS           The boot options were adjusted.
++  @retval EFI_OUT_OF_RESOURCES  Not enough memory.
++**/
++STATIC
++EFI_STATUS
++EFIAPI
++PlatformRefreshAllBootOptions (
++  IN  CONST EFI_BOOT_MANAGER_LOAD_OPTION  *BootOptions,
++  IN  CONST UINTN                         BootOptionsCount,
++  OUT       EFI_BOOT_MANAGER_LOAD_OPTION  **UpdatedBootOptions,
++  OUT       UINTN                         *UpdatedBootOptionsCount
++  )
++{
++  EFI_BOOT_MANAGER_LOAD_OPTION  *Options;
++  EFI_DEVICE_PATH_PROTOCOL      *Node;
++  BOOLEAN                       IsNetwork;
++  BOOLEAN                       NetworkBoot;
++  UINTN                         Index;
++  UINTN                         Count;
++  EFI_STATUS                    Status;
++
++  Options = AllocateZeroPool (MAX (BootOptionsCount, 1) * sizeof (*Options));
++  if (Options == NULL) {
++    return EFI_OUT_OF_RESOURCES;
++  }
++
++  NetworkBoot = CfrOptionGetUint32 ("network_stack", FALSE) != 0;
++  Count       = 0;
++  for (Index = 0; Index < BootOptionsCount; Index++) {
++    IsNetwork = FALSE;
++    for (Node = BootOptions[Index].FilePath; !IsDevicePathEnd (Node); Node = NextDevicePathNode (Node)) {
++      if ((DevicePathType (Node) == MESSAGING_DEVICE_PATH) && (DevicePathSubType (Node) == MSG_MAC_ADDR_DP)) {
++        IsNetwork = TRUE;
++      }
++    }
++
++    if (IsNetwork && !NetworkBoot) {
++      continue;
++    }
++
++    Status = EfiBootManagerInitializeLoadOption (
++               &Options[Count],
++               LoadOptionNumberUnassigned,
++               BootOptions[Index].OptionType,
++               BootOptions[Index].Attributes,
++               BootOptions[Index].Description,
++               BootOptions[Index].FilePath,
++               BootOptions[Index].OptionalData,
++               BootOptions[Index].OptionalDataSize
++               );
++    if (EFI_ERROR (Status)) {
++      EfiBootManagerFreeLoadOptions (Options, Count);
++      return Status;
++    }
++
++    Count++;
++  }
++
++  *UpdatedBootOptions      = Options;
++  *UpdatedBootOptionsCount = Count;
++  return EFI_SUCCESS;
++}
++
++STATIC EDKII_PLATFORM_BOOT_MANAGER_PROTOCOL  mPlatformBootManager = {
++  EDKII_PLATFORM_BOOT_MANAGER_PROTOCOL_REVISION,
++  PlatformRefreshAllBootOptions
++};
++
+ /**
+   Do the platform specific action before the console is connected.
+ 
+@@ -433,6 +510,31 @@ PlatformBootManagerBeforeConsole (
+   EFI_INPUT_KEY                 Down;
+   EFI_BOOT_MANAGER_LOAD_OPTION  BootOption;
+   BOOLEAN                       ConsoleInitialized;
++  EFI_HANDLE                    Handle;
++
++  Handle = NULL;
++  Status = gBS->InstallMultipleProtocolInterfaces (
++                  &Handle,
++                  &gEdkiiPlatformBootManagerProtocolGuid,
++                  &mPlatformBootManager,
++                  NULL
++                  );
++  ASSERT_EFI_ERROR (Status);
++
++  //
++  // The NIC drivers depend on this protocol: with the network stack off they don't load, so no
++  // NIC gets the network stack or its setup pages. With it on, they load at the next dispatch
++  // (EfiBootManagerConnectAll).
++  //
++  if (CfrOptionGetUint32 ("network_stack", FALSE) != 0) {
++    Status = gBS->InstallProtocolInterface (
++                    &Handle,
++                    &gUefiPayloadNetworkStackPolicyGuid,
++                    EFI_NATIVE_INTERFACE,
++                    NULL
++                    );
++    ASSERT_EFI_ERROR (Status);
++  }
+ 
+   //
+   // Register ENTER as CONTINUE key
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.h b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.h
+index fd77d52396..27ab3a2738 100644
+--- a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.h
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.h
+@@ -30,6 +30,8 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
+ #include <Library/TcgPhysicalPresenceLib.h>
+ #include <Library/Tcg2PhysicalPresenceLib.h>
+ #include <Library/TpmPlatformHierarchyLib.h>
++#include <Protocol/PlatformBootManager.h>
++#include <Library/CfrHelpersLib.h>
+ #include <Protocol/SmmAccess2.h>
+ 
+ typedef struct {
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
+index bac54904c1..8d87616ee7 100644
+--- a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
+@@ -55,6 +55,7 @@
+   TcgPhysicalPresenceLib
+   Tcg2PhysicalPresenceLib
+   TpmPlatformHierarchyLib
++  CfrHelpersLib
+ 
+ [Guids]
+   gEfiEndOfDxeEventGroupGuid
+@@ -72,6 +73,8 @@
+   gEfiSmmAccess2ProtocolGuid
+   gEfiSerialIoProtocolGuid
+   gEfiPciRootBridgeIoProtocolGuid
++  gEdkiiPlatformBootManagerProtocolGuid  ## PRODUCES
++  gUefiPayloadNetworkStackPolicyGuid     ## SOMETIMES_PRODUCES
+ 
+ [Pcd]
+   gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut
+diff --git a/UefiPayloadPkg/UefiPayloadPkg.dec b/UefiPayloadPkg/UefiPayloadPkg.dec
+index cd86780366..c48c0d3270 100644
+--- a/UefiPayloadPkg/UefiPayloadPkg.dec
++++ b/UefiPayloadPkg/UefiPayloadPkg.dec
+@@ -99,6 +99,10 @@
+   # Gop Temp
+   #
+   gPlatformGOPPolicyGuid                  = { 0xec2e931b, 0x3281, 0x48a5, { 0x81, 0x07, 0xdf, 0x8a, 0x8b, 0xed, 0x3c, 0x5d } }
++  #
++  # Installed when the "Enable UEFI Network Stack" setup option is on: the NIC drivers depend on it
++  #
++  gUefiPayloadNetworkStackPolicyGuid      = { 0x90a41e1a, 0xed50, 0x4f97, { 0xb8, 0x8f, 0x32, 0xf9, 0x6e, 0x22, 0x5b, 0xdf } }
+ 
+ ################################################################################
+ #
+diff --git a/UefiPayloadPkg/UefiPayloadPkg.dsc b/UefiPayloadPkg/UefiPayloadPkg.dsc
+index c89411c14b..95ff1bea73 100644
+--- a/UefiPayloadPkg/UefiPayloadPkg.dsc
++++ b/UefiPayloadPkg/UefiPayloadPkg.dsc
+@@ -206,6 +206,7 @@
+   DEFINE NETWORK_ENABLE                 = FALSE
+   DEFINE NETWORK_SNP_ENABLE             = FALSE
+   DEFINE NETWORK_IPXE                   = FALSE
++  DEFINE NETWORK_IPXE_DRIVER            = FALSE
+ 
+ !if $(NETWORK_PXE_BOOT) == TRUE
+   DEFINE NETWORK_ENABLE                 = TRUE
+@@ -219,6 +220,18 @@
+   DEFINE NETWORK_DRIVER_ENABLE          = TRUE
+ !endif
+ 
++#
++# iPXE built as a UEFI driver (ipxe.efidrv) gives the network stack a Simple Network Protocol
++# for every NIC iPXE supports, so SnpDxe isn't needed.
++#
++!if $(NETWORK_IPXE_DRIVER) == TRUE
++  DEFINE NETWORK_ENABLE                 = TRUE
++  DEFINE NETWORK_DRIVER_ENABLE          = TRUE
++  DEFINE NETWORK_IP4_ENABLE             = TRUE
++  DEFINE NETWORK_IP6_ENABLE             = TRUE
++  DEFINE NETWORK_SNP_ENABLE             = FALSE
++!endif
++
+ !include NetworkPkg/NetworkDefines.dsc.inc
+ 
+   # Security options:
+diff --git a/UefiPayloadPkg/UefiPayloadPkg.fdf b/UefiPayloadPkg/UefiPayloadPkg.fdf
+index b9653a8162..938253abe8 100644
+--- a/UefiPayloadPkg/UefiPayloadPkg.fdf
++++ b/UefiPayloadPkg/UefiPayloadPkg.fdf
+@@ -503,6 +503,12 @@ INF MdeModulePkg/Application/BootManagerMenuApp/BootManagerMenuApp.inf
+       SECTION PE32 = UefiPayloadPkg/NetworkDrivers/ipxe.efi
+     }
+   !endif
++  !if $(NETWORK_IPXE_DRIVER) == TRUE
++    FILE DRIVER = 1F36CB5D-6B8E-4A35-9D32-47A1C2E0E7B1 {
++      SECTION DXE_DEPEX_EXP = {gUefiPayloadNetworkStackPolicyGuid}
++      SECTION PE32 = UefiPayloadPkg/NetworkDrivers/ipxe.efidrv
++    }
++  !endif
+   #
+   # Rng Protocol producer
+   #

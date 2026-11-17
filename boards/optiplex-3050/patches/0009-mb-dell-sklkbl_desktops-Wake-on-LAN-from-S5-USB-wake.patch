@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:12:09 +0200
+Subject: [PATCH 09/12] mb/dell/sklkbl_desktops: Wake-on-LAN from S5, USB wake
+ from sleep
+
+coreboot disables all GPEs on S5 entry, so a NIC armed by the OS can't
+turn the system back on.
+
+In mainboard_smi_sleep_finalize():
+- on S5 entry, clear PCIEXPWAK_DIS, so a NIC can wake the system through
+  the PCH's WAKE# pin. The OS decides which NICs do, per interface.
+- on S3 entry with "Enable USB Wake Support" off, disable PME_B0, which
+  the OS armed for the xHCI controller through _PRW. Off by default and
+  S3 only, like Dell's option.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../dell/sklkbl_desktops/Makefile.mk          |  1 +
+ src/mainboard/dell/sklkbl_desktops/cfr.c      |  8 +++++++
+ .../dell/sklkbl_desktops/smihandler.c         | 23 +++++++++++++++++++
+ 3 files changed, 32 insertions(+)
+ create mode 100644 src/mainboard/dell/sklkbl_desktops/smihandler.c
+
+diff --git a/src/mainboard/dell/sklkbl_desktops/Makefile.mk b/src/mainboard/dell/sklkbl_desktops/Makefile.mk
+index 4afb42813e..3342274289 100644
+--- a/src/mainboard/dell/sklkbl_desktops/Makefile.mk
++++ b/src/mainboard/dell/sklkbl_desktops/Makefile.mk
+@@ -6,6 +6,7 @@ bootblock-y += variants/$(VARIANT_DIR)/early_gpio.c
+ romstage-y += variants/$(VARIANT_DIR)/romstage.c
+ 
+ ramstage-y += ramstage.c
++smm-y += smihandler.c
+ ramstage-$(CONFIG_DRIVERS_OPTION_CFR) += cfr.c
+ ramstage-y += variants/$(VARIANT_DIR)/gpio.c
+ ramstage-y += variants/$(VARIANT_DIR)/hda_verb.c
+diff --git a/src/mainboard/dell/sklkbl_desktops/cfr.c b/src/mainboard/dell/sklkbl_desktops/cfr.c
+index ed1ff5bb4c..0ad6505ae1 100644
+--- a/src/mainboard/dell/sklkbl_desktops/cfr.c
++++ b/src/mainboard/dell/sklkbl_desktops/cfr.c
+@@ -72,6 +72,13 @@ static const struct sm_object network_stack = SM_DECLARE_BOOL({
+ 	.default_value	= false,
+ });
+ 
++static const struct sm_object usb_wake = SM_DECLARE_BOOL({
++	.opt_name	= "usb_wake",
++	.ui_name	= "Enable USB Wake Support",
++	.ui_helptext	= "Allow USB devices to wake the system from sleep.",
++	.default_value	= false,
++});
++
+ static struct sm_obj_form security = {
+ 	.ui_name = "Security Options",
+ 	.obj_list = (const struct sm_object *[]) {
+@@ -108,6 +115,7 @@ static struct sm_obj_form power = {
+ 		&deep_sx,
+ 		&fan_full_speed,
+ 		&block_sleep,
++		&usb_wake,
+ 		NULL
+ 	},
+ };
+diff --git a/src/mainboard/dell/sklkbl_desktops/smihandler.c b/src/mainboard/dell/sklkbl_desktops/smihandler.c
+new file mode 100644
+index 0000000000..48888d24da
+--- /dev/null
++++ b/src/mainboard/dell/sklkbl_desktops/smihandler.c
+@@ -0,0 +1,23 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <acpi/acpi.h>
++#include <arch/io.h>
++#include <cpu/x86/smm.h>
++#include <intelblocks/pmclib.h>
++#include <option.h>
++#include <soc/iomap.h>
++#include <soc/pm.h>
++
++void mainboard_smi_sleep_finalize(u8 slp_typ)
++{
++	/* The OS arms PME_B0, the xHCI controller's GPE, through _PRW */
++	if (slp_typ == ACPI_S3 && !get_uint_option("usb_wake", 0))
++		pmc_disable_std_gpe(PME_B0_EN);
++
++	if (slp_typ != ACPI_S5)
++		return;
++
++	/* NICs wake through WAKE#, which needs PCIEXPWAK_DIS clear. The OS arms them per interface. */
++	outw(PCIEXPWAK_STS, ACPI_BASE_ADDRESS + PM1_STS);
++	pmc_enable_pm1(pmc_read_pm1_enable() & ~PCIEXPWAK_DIS);
++}

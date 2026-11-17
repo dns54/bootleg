@@ -1,0 +1,252 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 01:57:30 +0200
+Subject: [PATCH 01/25] UefiPayloadPkg: Import coreboot's TPM 2.0 event log
+
+coreboot measures its own stages into the TPM and keeps a TCG TPM 2.0
+event log in CBMEM. Tcg2Dxe starts a separate EFI event log, so without
+coreboot's events the EFI log can't explain PCR 2, and coreboot's log
+alone can't explain anything edk2 measured.
+
+Find coreboot's log in CBMEM and turn each event into a
+gTcgEvent2EntryHob, which Tcg2Dxe copies into the EFI log as it would
+events from a PEI phase. Skip coreboot's Spec ID Event: Tcg2Dxe writes
+its own, listing the active PCR banks.
+
+Based on Dasharo's "DasharoPayloadPkg,SecurityPkg: import coreboot's
+TPM log" (Sergii Dmytruk), which does this in BlSupportPei. The
+UefiPayloadPkg has no PEI phase, so this runs in UefiPayloadEntry, and
+it handles TPM 2.0 logs only.
+
+Link: https://github.com/Dasharo/edk2/commit/27b3afc03924cc029d175269025a3af2921dee9c
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ UefiPayloadPkg/Include/Library/BlParseLib.h   | 17 ++++
+ .../Library/CbParseLib/CbParseLib.c           | 21 +++++
+ .../Library/SblParseLib/SblParseLib.c         | 20 +++++
+ .../UefiPayloadEntry/UefiPayloadEntry.c       | 81 +++++++++++++++++++
+ .../UefiPayloadEntry/UefiPayloadEntry.h       |  2 +
+ .../UefiPayloadEntry/UefiPayloadEntry.inf     |  2 +
+ 6 files changed, 143 insertions(+)
+
+diff --git a/UefiPayloadPkg/Include/Library/BlParseLib.h b/UefiPayloadPkg/Include/Library/BlParseLib.h
+index 7313b55f0e..d7954c5ece 100644
+--- a/UefiPayloadPkg/Include/Library/BlParseLib.h
++++ b/UefiPayloadPkg/Include/Library/BlParseLib.h
+@@ -215,3 +215,20 @@ EFIAPI
+ ParseBootMediaInfo (
+   OUT BOOT_MEDIA_INFO  *BootMediaInfo
+   );
++
++/**
++  Find the bootloader's TPM 2.0 event log.
++
++  @param  Log       The base address of the event log
++  @param  Size      The size of the event log area
++
++  @retval RETURN_SUCCESS     Successfully found the event log.
++  @retval RETURN_NOT_FOUND   Failed to find the event log.
++
++**/
++RETURN_STATUS
++EFIAPI
++ParseTpm2EventLog (
++  OUT VOID    **Log,
++  OUT UINT32  *Size
++  );
+diff --git a/UefiPayloadPkg/Library/CbParseLib/CbParseLib.c b/UefiPayloadPkg/Library/CbParseLib/CbParseLib.c
+index 78573251bb..9df0a3deae 100644
+--- a/UefiPayloadPkg/Library/CbParseLib/CbParseLib.c
++++ b/UefiPayloadPkg/Library/CbParseLib/CbParseLib.c
+@@ -1116,3 +1116,24 @@ ParseBootMediaInfo (
+ 
+   return RETURN_SUCCESS;
+ }
++
++/**
++  Find the bootloader's TPM 2.0 event log.
++
++  @param  Log       The base address of the event log
++  @param  Size      The size of the event log area
++
++  @retval RETURN_SUCCESS     Successfully found the event log.
++  @retval RETURN_NOT_FOUND   Failed to find the event log.
++
++**/
++RETURN_STATUS
++EFIAPI
++ParseTpm2EventLog (
++  OUT VOID    **Log,
++  OUT UINT32  *Size
++  )
++{
++  // CBMEM_ID_TPM2_TCG_LOG
++  return ParseCbMemTable (SIGNATURE_32 ('2', 'M', 'P', 'T'), Log, Size);
++}
+diff --git a/UefiPayloadPkg/Library/SblParseLib/SblParseLib.c b/UefiPayloadPkg/Library/SblParseLib/SblParseLib.c
+index 3d34b646ef..c901a75568 100644
+--- a/UefiPayloadPkg/Library/SblParseLib/SblParseLib.c
++++ b/UefiPayloadPkg/Library/SblParseLib/SblParseLib.c
+@@ -379,3 +379,23 @@ ParseBootMediaInfo (
+ {
+   return RETURN_NOT_FOUND;
+ }
++
++/**
++  Find the bootloader's TPM 2.0 event log.
++
++  @param  Log       The base address of the event log
++  @param  Size      The size of the event log area
++
++  @retval RETURN_SUCCESS     Successfully found the event log.
++  @retval RETURN_NOT_FOUND   Failed to find the event log.
++
++**/
++RETURN_STATUS
++EFIAPI
++ParseTpm2EventLog (
++  OUT VOID    **Log,
++  OUT UINT32  *Size
++  )
++{
++  return RETURN_NOT_FOUND;
++}
+diff --git a/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.c b/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.c
+index 55c23671c9..4cdab037c1 100644
+--- a/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.c
++++ b/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.c
+@@ -334,6 +334,80 @@ MemInfoCallback (
+   return RETURN_SUCCESS;
+ }
+ 
++// PCRIndex, EventType and the digest count come before the digests.
++#define TCG_PCR_EVENT2_DIGESTS_OFFSET  (sizeof (UINT32) * 3)
++
++/**
++  Turn the bootloader's TPM 2.0 event log into event HOBs, which Tcg2Dxe copies
++  into the EFI event log as it would events from a PEI phase.
++
++  Every event carries one digest per algorithm of the log's Spec ID Event.
++
++  @param  Log     The event log.
++  @param  Size    Size of the event log area.
++**/
++STATIC
++VOID
++ImportTpm2EventLog (
++  IN CONST VOID  *Log,
++  IN UINTN       Size
++  )
++{
++  CONST TCG_PCR_EVENT_HDR                *SpecIdHeader;
++  CONST TCG_EfiSpecIDEventStruct         *SpecId;
++  CONST TCG_EfiSpecIdEventAlgorithmSize  *AlgorithmSizes;
++  CONST UINT8                            *Entry;
++  UINT32                                 NumberOfAlgorithms;
++  UINTN                                  DigestsSize;
++  UINTN                                  EntrySize;
++  UINTN                                  Offset;
++  UINTN                                  Index;
++
++  SpecIdHeader = Log;
++  SpecId       = (CONST TCG_EfiSpecIDEventStruct *)(SpecIdHeader + 1);
++  if ((Size < sizeof (*SpecIdHeader) + sizeof (*SpecId) + sizeof (UINT32)) ||
++      (SpecIdHeader->EventType != EV_NO_ACTION) ||
++      (SpecIdHeader->EventSize > Size - sizeof (*SpecIdHeader)) ||
++      (CompareMem (SpecId->signature, TCG_EfiSpecIDEventStruct_SIGNATURE_03, sizeof (SpecId->signature)) != 0) ||
++      (SpecId->specVersionMajor != 2) || (SpecId->specVersionMinor != 0))
++  {
++    DEBUG ((DEBUG_WARN, "%a: unknown TPM 2.0 log format, not importing it\n", __func__));
++    return;
++  }
++
++  NumberOfAlgorithms = ReadUnaligned32 ((CONST UINT32 *)(SpecId + 1));
++  AlgorithmSizes     = (CONST TCG_EfiSpecIdEventAlgorithmSize *)((CONST UINT8 *)(SpecId + 1) + sizeof (UINT32));
++  if (sizeof (*SpecId) + sizeof (UINT32) + (UINT64)NumberOfAlgorithms * sizeof (*AlgorithmSizes) > SpecIdHeader->EventSize) {
++    DEBUG ((DEBUG_WARN, "%a: malformed Spec ID Event, not importing the log\n", __func__));
++    return;
++  }
++
++  DigestsSize = 0;
++  for (Index = 0; Index < NumberOfAlgorithms; Index++) {
++    DigestsSize += sizeof (TPMI_ALG_HASH) + AlgorithmSizes[Index].digestSize;
++  }
++
++  // Tcg2Dxe writes its own Spec ID Event, listing the active PCR banks.
++  Offset = sizeof (*SpecIdHeader) + SpecIdHeader->EventSize;
++  while (Offset + TCG_PCR_EVENT2_DIGESTS_OFFSET + DigestsSize + sizeof (UINT32) <= Size) {
++    Entry = (CONST UINT8 *)Log + Offset;
++    // Unused space after the last event is zeroed.
++    if (IsZeroBuffer (Entry, TCG_PCR_EVENT2_DIGESTS_OFFSET)) {
++      break;
++    }
++
++    EntrySize = TCG_PCR_EVENT2_DIGESTS_OFFSET + DigestsSize + sizeof (UINT32) +
++                ReadUnaligned32 ((CONST UINT32 *)(Entry + TCG_PCR_EVENT2_DIGESTS_OFFSET + DigestsSize));
++    if (EntrySize > Size - Offset) {
++      DEBUG ((DEBUG_WARN, "%a: truncated event at offset 0x%x\n", __func__, Offset));
++      break;
++    }
++
++    BuildGuidDataHob (&gTcgEvent2EntryHobGuid, (VOID *)Entry, EntrySize);
++    Offset += EntrySize;
++  }
++}
++
+ /**
+   It will build HOBs based on information from bootloaders.
+ 
+@@ -355,6 +429,8 @@ BuildHobFromBl (
+   TCG_PHYSICAL_PRESENCE_INFO        *NewPhysicalPresenceInfo;
+   BOOT_MEDIA_INFO                   BootMediaInfo;
+   BOOT_MEDIA_INFO                   *NewBootMediaInfo;
++  VOID                              *Tpm2EventLog;
++  UINT32                            Tpm2EventLogSize;
+   EFI_PEI_GRAPHICS_INFO_HOB         GfxInfo;
+   EFI_PEI_GRAPHICS_INFO_HOB         *NewGfxInfo;
+   EFI_PEI_GRAPHICS_DEVICE_INFO_HOB  GfxDeviceInfo;
+@@ -446,6 +522,11 @@ BuildHobFromBl (
+     DEBUG ((DEBUG_INFO, "Created boot media info hob\n"));
+   }
+ 
++  Status = ParseTpm2EventLog (&Tpm2EventLog, &Tpm2EventLogSize);
++  if (!EFI_ERROR (Status)) {
++    ImportTpm2EventLog (Tpm2EventLog, Tpm2EventLogSize);
++  }
++
+   //
+   // Create SmBios table Hob
+   //
+diff --git a/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.h b/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.h
+index 0d60920142..ad97ac72a5 100644
+--- a/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.h
++++ b/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.h
+@@ -40,6 +40,8 @@
+ #include <Guid/FirmwareInfoGuid.h>
+ #include <Guid/SmmStoreInfoGuid.h>
+ #include <Guid/TcgPhysicalPresenceGuid.h>
++#include <Guid/TcgEventHob.h>
++#include <IndustryStandard/UefiTcgPlatform.h>
+ 
+ #define LEGACY_8259_MASK_REGISTER_MASTER  0x21
+ #define LEGACY_8259_MASK_REGISTER_SLAVE   0xA1
+diff --git a/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.inf b/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.inf
+index b4f5768f21..618ab06f0f 100644
+--- a/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.inf
++++ b/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.inf
+@@ -45,6 +45,7 @@
+   MdeModulePkg/MdeModulePkg.dec
+   UefiCpuPkg/UefiCpuPkg.dec
+   UefiPayloadPkg/UefiPayloadPkg.dec
++  SecurityPkg/SecurityPkg.dec
+ 
+ [LibraryClasses]
+   BaseMemoryLib
+@@ -74,6 +75,7 @@
+   gEfiSmmStoreInfoHobGuid
+   gEfiTcgPhysicalPresenceInfoHobGuid
+   gEfiBootMediaInfoHobGuid
++  gTcgEvent2EntryHobGuid
+ 
+ [FeaturePcd.IA32]
+   gEfiMdeModulePkgTokenSpaceGuid.PcdDxeIplSwitchToLongMode      ## CONSUMES

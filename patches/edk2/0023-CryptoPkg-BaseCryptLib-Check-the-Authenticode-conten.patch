@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 05:28:19 +0200
+Subject: [PATCH 23/25] CryptoPkg/BaseCryptLib: Check the Authenticode content
+ size
+
+AuthenticodeVerify() takes the size of SpcIndirectDataContent from the
+DER length bytes in the image's signature and uses it without checking
+it against the size of the ASN.1 string that holds the content. With a
+size smaller than the hash, the hash comparison reads before the
+content; with a size larger than the string, the comparison and
+Pkcs7Verify() read past it.
+
+DxeImageVerificationLib calls this for every signed image before it
+decides whether to trust it, so an image on a USB stick can trigger
+these reads with Secure Boot on.
+
+Require the string to hold the tag and length, and the content to hold
+the hash and fit in the string.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ CryptoPkg/Library/BaseCryptLib/Pk/CryptAuthenticode.c | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/CryptoPkg/Library/BaseCryptLib/Pk/CryptAuthenticode.c b/CryptoPkg/Library/BaseCryptLib/Pk/CryptAuthenticode.c
+index ff1e059880..849ce22cb2 100644
+--- a/CryptoPkg/Library/BaseCryptLib/Pk/CryptAuthenticode.c
++++ b/CryptoPkg/Library/BaseCryptLib/Pk/CryptAuthenticode.c
+@@ -69,6 +69,7 @@ AuthenticodeVerify (
+   CONST UINT8  *Temp;
+   CONST UINT8  *OrigAuthData;
+   UINT8        *SpcIndirectDataContent;
++  UINT8        *SpcIndirectDataContentEnd;
+   UINT8        Asn1Byte;
+   UINTN        ContentSize;
+   CONST UINT8  *SpcIndirectDataOid;
+@@ -129,6 +130,15 @@ AuthenticodeVerify (
+ 
+   SpcIndirectDataContent = (UINT8 *)(Pkcs7->d.sign->contents->d.other->value.asn1_string->data);
+ 
++  //
++  // The SEQUENCE tag and length take up to 4 bytes; everything after them must be in the string.
++  //
++  if (Pkcs7->d.sign->contents->d.other->value.asn1_string->length < 4) {
++    goto _Exit;
++  }
++
++  SpcIndirectDataContentEnd = SpcIndirectDataContent + Pkcs7->d.sign->contents->d.other->value.asn1_string->length;
++
+   //
+   // Retrieve the SEQUENCE data size from ASN.1-encoded SpcIndirectDataContent.
+   //
+@@ -166,10 +176,16 @@ AuthenticodeVerify (
+     goto _Exit;
+   }
+ 
++  //
++  // The content holds the image hash at its end, and must lie within the string.
++  //
++  if ((ContentSize < HashSize) || (ContentSize > (UINTN)(SpcIndirectDataContentEnd - SpcIndirectDataContent))) {
++    goto _Exit;
++  }
++
+   //
+   // Compare the original file hash value to the digest retrieve from SpcIndirectDataContent
+   // defined in Authenticode
+-  // NOTE: Need to double-check HashLength here!
+   //
+   if (CompareMem (SpcIndirectDataContent + ContentSize - HashSize, ImageHash, HashSize) != 0) {
+     //

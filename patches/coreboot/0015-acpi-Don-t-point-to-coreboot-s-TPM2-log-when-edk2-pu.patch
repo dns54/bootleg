@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 01:55:49 +0200
+Subject: [PATCH 15/29] acpi: Don't point to coreboot's TPM2 log when edk2
+ publishes one
+
+edk2 imports coreboot's TPM 2.0 event log from CBMEM and publishes a
+complete log, covering coreboot's and its own measurements, through
+the EFI configuration table. Linux reads the log from the ACPI TPM2
+table first, so as long as the table points to coreboot's log the OS
+never sees the measurements made by edk2.
+
+Leave LAML/LASA empty when edk2 has its TPM drivers. Unlike Dasharo's
+change ("acpi: don't publish TPM logs if EDK payload is used"), keep
+the TPM2 table itself, because the edk2 UefiPayloadPkg uses it to
+detect the TPM.
+
+Link: https://github.com/Dasharo/coreboot/commit/a183145fa047b7677cb8a49112bab336f4b91fdb
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/acpi/acpi.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/acpi/acpi.c b/src/acpi/acpi.c
+index 155105b96d..8ddb7048e9 100644
+--- a/src/acpi/acpi.c
++++ b/src/acpi/acpi.c
+@@ -289,8 +289,15 @@ static void acpi_create_tpm2(acpi_header_t *header, void *unused)
+ 	/*
+ 	 * Some payloads like SeaBIOS depend on log area to use TPM2.
+ 	 * Get the memory size and address of TPM2 log area or initialize it.
++	 *
++	 * edk2 publishes a complete log that includes coreboot's, and the OS
++	 * reads this table's log first, so leave it out. Keep the table: edk2
++	 * uses it to detect the TPM.
+ 	 */
+-	void *lasa = get_tpm2_log(&tpm2_log_len);
++	void *lasa = NULL;
++	tpm2_log_len = 0;
++	if (!CONFIG(PAYLOAD_EDK2) || CONFIG(EDK2_DISABLE_TPM))
++		lasa = get_tpm2_log(&tpm2_log_len);
+ 	if (!lasa)
+ 		tpm2_log_len = 0;
+ 

@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 12:45:40 +0200
+Subject: [PATCH 17/25] UefiPayloadPkg: Open the boot menu when nothing can be
+ booted
+
+When no boot option could be launched, BDS calls
+PlatformBootManagerUnableToBoot() and then loops forever. Ours returned
+right away, so a machine without a bootable disk sat on the logo with no
+message and no way into setup: the "Enter Setup" option is an
+application, which BDS doesn't boot on its own, and the Esc hotkey is
+only read while a boot option is about to start.
+
+Open the boot manager menu instead, the same menu that Esc opens, as
+OvmfPkg does. Leaving the menu opens it again.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../PlatformBootManagerLib/PlatformBootManager.c    | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+index 749c23dbee..034cef0b8e 100644
+--- a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+@@ -818,5 +818,16 @@ PlatformBootManagerUnableToBoot (
+   VOID
+   )
+ {
+-  return;
++  EFI_BOOT_MANAGER_LOAD_OPTION  BootManagerMenu;
++
++  //
++  // Show the menu that Esc opens instead of a silent logo. Leaving it comes back here.
++  //
++  if (EFI_ERROR (EfiBootManagerGetBootManagerMenu (&BootManagerMenu))) {
++    return;
++  }
++
++  for ( ; ;) {
++    EfiBootManagerBoot (&BootManagerMenu);
++  }
+ }

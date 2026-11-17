@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 15:18:15 +0200
+Subject: [PATCH 23/29] device: Build azalia_device.c for romstage too
+
+Let a mainboard talk to its HDA codec before ramstage, for example to
+open the PC beep path for a beep code when memory init fails.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/device/Makefile.mk | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/device/Makefile.mk b/src/device/Makefile.mk
+index a2f0d3ec3a..00b59ed888 100644
+--- a/src/device/Makefile.mk
++++ b/src/device/Makefile.mk
+@@ -5,6 +5,7 @@ ramstage-y += root_device.c
+ ramstage-y += cpu_device.c
+ ramstage-y += device_util.c
+ ramstage-$(CONFIG_AZALIA_HDA_CODEC_SUPPORT) += azalia_device.c
++romstage-$(CONFIG_AZALIA_HDA_CODEC_SUPPORT) += azalia_device.c
+ ramstage-$(CONFIG_ARCH_RAMSTAGE_X86_32) += pnp_device.c
+ ramstage-$(CONFIG_ARCH_RAMSTAGE_X86_64) += pnp_device.c
+ ramstage-y += smbus_ops.c

@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mate Kukri <kukri.mate@gmail.com>
+Date: Sun, 14 Jul 2024 14:24:12 +0100
+Subject: [PATCH 04/12] mb/dell/optiplex_3050: Enable the TPM
+
+[WIP] OptiPlex 3050 Micro port
+
+- Boots Linux
+- SMSC SCH5553 SIO/EC
+  + Early EC init + HWM init implemented
+  + Console on serial port tested
+  + TODO: late HWM init for fan control (fan runs at low speed now)
+- Realtek Gigabit LAN works
+- WiFi slot works
+- NVMe SSD slot works
+- Extra: LPSS UART0
+  + Stock FW sets undocumented power gating bit, RTC battery needs to
+    be pulled for it to work.
+  + Signals exposed on test points on the back of the board.
+    FIXME: add documentation about this
+- Needs 'deguard' to bypass BootGuard
+  + See https://review.coreboot.org/plugins/gitiles/deguard
+- TODO: HDA verbs
+- TODO: USB ports
+- TODO: Add VBT
+- Currently limited to the Micro form factor, but others are very
+  similar
+
+Change-Id: I8d443e39ee684a4eaa19c835a945cfe569c051e2
+Signed-off-by: Mate Kukri <kukri.mate@gmail.com>
+Link: https://codeberg.org/libreboot/lbmk/src/commit/c723ce56d2ae228fb0ead686ad0c6fa6e2a92c36
+[Deividas Nastajus: only the TPM part (Kconfig selects, devicetree node), which the merged port dropped]
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/mainboard/dell/sklkbl_desktops/Kconfig                  | 2 ++
+ .../sklkbl_desktops/variants/optiplex_3050/overridetree.cb  | 6 ++++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/src/mainboard/dell/sklkbl_desktops/Kconfig b/src/mainboard/dell/sklkbl_desktops/Kconfig
+index 0dce6a90bf..de963a6f6a 100644
+--- a/src/mainboard/dell/sklkbl_desktops/Kconfig
++++ b/src/mainboard/dell/sklkbl_desktops/Kconfig
+@@ -22,6 +22,8 @@ config BOARD_DELL_SKLKBL_DESKTOPS_COMMON
+ config BOARD_DELL_OPTIPLEX_3050
+ 	bool
+ 	select BOARD_DELL_SKLKBL_DESKTOPS_COMMON
++	select MAINBOARD_HAS_TPM2
++	select MEMORY_MAPPED_TPM
+ 
+ if BOARD_DELL_SKLKBL_DESKTOPS_COMMON
+ 
+diff --git a/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/overridetree.cb b/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/overridetree.cb
+index 911c8c3ba6..c762c4fe3f 100644
+--- a/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/overridetree.cb
++++ b/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/overridetree.cb
+@@ -49,5 +49,11 @@ chip soc/intel/skylake
+ 			register "PcieRpHotPlug[20]"                    = "0"
+ 		end
+ 
++		device ref lpc_espi on
++			chip drivers/pc80/tpm
++				device pnp 0c31.0 on end
++			end
++		end
++
+ 	end
+ end

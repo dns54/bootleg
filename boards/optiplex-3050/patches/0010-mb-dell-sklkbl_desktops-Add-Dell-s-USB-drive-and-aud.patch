@@ -1,0 +1,209 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:14:29 +0200
+Subject: [PATCH 10/12] mb/dell/sklkbl_desktops: Add Dell's USB, drive and
+ audio switches
+
+Add the switches Dell's setup has for this board. Enable Boot Support
+goes to a USB Configuration form with the firmware features:
+
+- Enable Boot Support: boot from USB storage (read by edk2,
+  patches/edk2/0014).
+
+The others go to a Devices form in the Platform Setup Menu:
+
+- Enable Front USB Ports / Enable Rear USB Ports: the xHCI ports behind
+  the front and rear connectors, from the devicetree's port comments.
+- SATA-0 and M.2 PCIe SSD-0: the SATA controller (the board has one
+  SATA port, AHCI only, so this replaces Dell's SATA Operation) and the
+  M.2 SSD slot's root port, pcie_rp21.
+- Enable Audio and Enable Internal Speaker: the HDA controller, and the
+  ALC3234's speaker pin, described as not connected when off.
+
+All default to on, as on Dell. The devices are switched off in the
+devicetree before FSP-S reads it.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/mainboard/dell/sklkbl_desktops/cfr.c      | 75 +++++++++++++++++++
+ src/mainboard/dell/sklkbl_desktops/ramstage.c | 48 ++++++++++++
+ 2 files changed, 123 insertions(+)
+
+diff --git a/src/mainboard/dell/sklkbl_desktops/cfr.c b/src/mainboard/dell/sklkbl_desktops/cfr.c
+index 0ad6505ae1..c264ad781c 100644
+--- a/src/mainboard/dell/sklkbl_desktops/cfr.c
++++ b/src/mainboard/dell/sklkbl_desktops/cfr.c
+@@ -79,6 +79,57 @@ static const struct sm_object usb_wake = SM_DECLARE_BOOL({
+ 	.default_value	= false,
+ });
+ 
++static const struct sm_object usb_boot = SM_DECLARE_BOOL({
++	.opt_name	= "usb_boot",
++	.ui_name	= "Enable Boot Support",
++	.ui_helptext	= "Allow booting from USB mass storage devices. The OS still sees them"
++			  " while their port is enabled.",
++	.default_value	= true,
++});
++
++static const struct sm_object usb_front = SM_DECLARE_BOOL({
++	.opt_name	= "usb_front",
++	.ui_name	= "Enable Front USB Ports",
++	.ui_helptext	= "Enable or disable the front USB ports.",
++	.default_value	= true,
++});
++
++static const struct sm_object usb_rear = SM_DECLARE_BOOL({
++	.opt_name	= "usb_rear",
++	.ui_name	= "Enable Rear USB Ports",
++	.ui_helptext	= "Enable or disable the rear USB ports.",
++	.default_value	= true,
++});
++
++static const struct sm_object sata0 = SM_DECLARE_BOOL({
++	.opt_name	= "sata0",
++	.ui_name	= "SATA-0",
++	.ui_helptext	= "Enable or disable SATA drive 0.",
++	.default_value	= true,
++});
++
++static const struct sm_object m2_ssd = SM_DECLARE_BOOL({
++	.opt_name	= "m2_ssd",
++	.ui_name	= "M.2 PCIe SSD-0",
++	.ui_helptext	= "Enable or disable M.2 PCIe SSD drive 0.",
++	.default_value	= true,
++});
++
++static const struct sm_object audio = SM_DECLARE_BOOL({
++	.opt_name	= "audio",
++	.ui_name	= "Enable Audio",
++	.ui_helptext	= "Enable or disable the integrated audio controller. When disabled,"
++			  " the controller and all of its functions are off.",
++	.default_value	= true,
++});
++
++static const struct sm_object speaker = SM_DECLARE_BOOL({
++	.opt_name	= "speaker",
++	.ui_name	= "Enable Internal Speaker",
++	.ui_helptext	= "Enable or disable the internal speaker.",
++	.default_value	= true,
++}, WITH_DEP_VALUES(&audio, true));
++
+ static struct sm_obj_form security = {
+ 	.ui_name = "Security Options",
+ 	.obj_list = (const struct sm_object *[]) {
+@@ -95,6 +146,14 @@ static struct sm_obj_form networking = {
+ 	},
+ };
+ 
++static struct sm_obj_form usb = {
++	.ui_name = "USB Configuration",
++	.obj_list = (const struct sm_object *[]) {
++		&usb_boot,
++		NULL
++	},
++};
++
+ static struct sm_obj_form chipset = {
+ 	.flags = CFR_OPTFLAG_PLATFORM,
+ 	.ui_name = "Chipset Configuration",
+@@ -143,13 +202,29 @@ static struct sm_obj_form cpu = {
+ 	},
+ };
+ 
++static struct sm_obj_form devices = {
++	.flags = CFR_OPTFLAG_PLATFORM,
++	.ui_name = "Devices",
++	.obj_list = (const struct sm_object *[]) {
++		&usb_front,
++		&usb_rear,
++		&sata0,
++		&m2_ssd,
++		&audio,
++		&speaker,
++		NULL
++	},
++};
++
+ static struct sm_obj_form *sm_root[] = {
+ 	&security,
+ 	&networking,
++	&usb,
+ 	&cpu,
+ 	&chipset,
+ 	&pcie,
+ 	&power,
++	&devices,
+ 	NULL
+ };
+ 
+diff --git a/src/mainboard/dell/sklkbl_desktops/ramstage.c b/src/mainboard/dell/sklkbl_desktops/ramstage.c
+index b62a78abac..3f400f82b5 100644
+--- a/src/mainboard/dell/sklkbl_desktops/ramstage.c
++++ b/src/mainboard/dell/sklkbl_desktops/ramstage.c
+@@ -5,14 +5,19 @@
+ #include <bootstate.h>
+ #include <arch/cpuid.h>
+ #include <console/console.h>
++#include <device/azalia_device.h>
++#include <device/device.h>
+ #include <cpu/x86/msr.h>
+ #include <halt.h>
+ #include <intelblocks/pmclib.h>
+ #include <option.h>
+ #include <soc/gpio.h>
++#include <soc/pci_devs.h>
+ #include <soc/pm.h>
+ #include <soc/pmc.h>
+ #include <soc/ramstage.h>
++#include <soc/soc_chip.h>
++#include <static.h>
+ #include "../../../include/variant/gpio.h"
+ #include <superio/smsc/sch555x/sch555x.h>
+ 
+@@ -563,3 +568,46 @@ static void sch5555_ac_recovery(void *arg)
+ }
+ 
+ BOOT_STATE_INIT_ENTRY(BS_DEV_INIT_CHIPS, BS_ON_EXIT, sch5555_ac_recovery, NULL);
++
++static void disable_usb_ports(struct usb2_port_config *usb2, const u8 *ports2, size_t count2,
++			      struct usb3_port_config *usb3, const u8 *ports3, size_t count3)
++{
++	for (size_t i = 0; i < count2; i++)
++		usb2[ports2[i]].enable = 0;
++	for (size_t i = 0; i < count3; i++)
++		usb3[ports3[i]].enable = 0;
++}
++
++/* Before FSP-S reads the devicetree */
++static void apply_device_options(void *arg)
++{
++	struct soc_intel_skylake_config *config = config_of_soc();
++	static const u8 front2[] = { 0, 1 }, front3[] = { 0, 1 };
++	static const u8 rear2[] = { 2, 3, 4, 6 }, rear3[] = { 2, 3 };
++
++	if (!get_uint_option("usb_front", 1))
++		disable_usb_ports(config->usb2_ports, front2, ARRAY_SIZE(front2),
++				  config->usb3_ports, front3, ARRAY_SIZE(front3));
++	if (!get_uint_option("usb_rear", 1))
++		disable_usb_ports(config->usb2_ports, rear2, ARRAY_SIZE(rear2),
++				  config->usb3_ports, rear3, ARRAY_SIZE(rear3));
++	if (!get_uint_option("sata0", 1))
++		devfn_disable(pci_root_bus(), PCH_DEVFN_SATA);
++	if (!get_uint_option("m2_ssd", 1))
++		devfn_disable(pci_root_bus(), PCH_DEVFN_PCIE21);
++	if (!get_uint_option("audio", 1))
++		devfn_disable(pci_root_bus(), PCH_DEVFN_HDA);
++}
++
++BOOT_STATE_INIT_ENTRY(BS_PRE_DEVICE, BS_ON_EXIT, apply_device_options, NULL);
++
++/* "Enable Internal Speaker" off: describe the ALC3234's speaker pin as not connected. */
++void mainboard_azalia_program_runtime_verbs(u8 *base, u32 viddid)
++{
++	static const u32 speaker_off[] = {
++		AZALIA_PIN_CFG(0, 0x14, AZALIA_PIN_CFG_NC(0)),
++	};
++
++	if (viddid == 0x10ec0255 && !get_uint_option("speaker", 1))
++		azalia_program_verb_table(base, speaker_off, ARRAY_SIZE(speaker_off));
++}

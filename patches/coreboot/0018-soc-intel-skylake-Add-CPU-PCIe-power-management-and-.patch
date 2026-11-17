@@ -1,0 +1,316 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 02:23:30 +0200
+Subject: [PATCH 18/29] soc/intel/skylake: Add CPU, PCIe power management and
+ Deep Sx options
+
+Let a soc/intel/skylake board (Skylake, Kaby Lake and Coffee Lake CPUs
+on 100/200-series PCHs) offer these in its setup menu (CFR). Without
+the options, the devicetree values apply as before.
+
+PCIe power management: the common Intel CFR objects pciexp_aspm,
+pciexp_l1ss and pciexp_clk_pm can already be added to the menu, but
+this SoC code never reads them, so changing them has no effect. Newer
+SoCs read them in soc/intel/common/block/aspm, which this SoC doesn't
+use. Read them when filling the FSP-S root port settings. They apply to
+all root ports, with the devicetree values as the fallback. The option
+values use the same encoding as the devicetree enums (FSP value + 1).
+Clock PM can only turn CLKREQ support off, since boards set it per port
+depending on wiring.
+
+SpeedStep (EIST), Turbo Boost and C-states, with the names and help
+texts of Dell's setup on the OptiPlex 3050 (both the Kaby Lake and the
+Amber Lake FSP have the same UPDs):
+
+- eist: replaces the devicetree's eist_enable, which stays the
+  default. It sets the IA32_MISC_ENABLE bit, the FSP Eist UPD and
+  whether ACPI P-state tables are generated.
+- turbo_mode: coreboot always enabled Turbo. Now it enables or
+  disables it, and sets the FSP TurboMode UPD to match, so the two
+  don't disagree. Turbo needs EIST, so it is off when EIST is.
+- c_states: sets the package C-state limit in
+  MSR_PKG_CST_CONFIG_CONTROL to C0/C1 on every core, the FSP Cx UPD,
+  and limits the ACPI _CST to C1. The MSR has to be written by
+  coreboot: FSP skips its CPU power management setup (and so the Cx
+  and PkgCStateLimit UPDs) because coreboot starts the APs. The limit
+  is for the package only; Linux's intel_idle ignores _CST, and the
+  cores can still enter their own C-states.
+
+The CPU options are read once on the BSP before the APs start, since
+soc_core_init() runs on every core.
+
+Deep Sx: set at build time by the devicetree's deep_s3/deep_s5
+registers. The deep_sx option replaces them when it is set, with the
+name, values and help text of Dell's "Deep Sleep Control": disabled,
+enabled in S5 only, or enabled in S4 and S5. config_deep_s5() always
+sets S4 like S5, so "S5 only" clears the S4 policy afterwards. Deep S3
+is left out, as in Dell's setup. Deep Sx lowers standby power, but can
+stop Wake-on-LAN and USB wake, so the menu default is disabled.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/soc/intel/skylake/acpi.c            |  6 +++-
+ src/soc/intel/skylake/chip.c            | 20 +++++++++----
+ src/soc/intel/skylake/cpu.c             | 33 ++++++++++++++++++---
+ src/soc/intel/skylake/include/soc/cfr.h | 39 +++++++++++++++++++++++++
+ src/soc/intel/skylake/include/soc/pm.h  |  6 ++++
+ src/soc/intel/skylake/pmc.c             | 17 +++++++++--
+ 6 files changed, 108 insertions(+), 13 deletions(-)
+
+diff --git a/src/soc/intel/skylake/acpi.c b/src/soc/intel/skylake/acpi.c
+index 76940334d7..b8ab925bc9 100644
+--- a/src/soc/intel/skylake/acpi.c
++++ b/src/soc/intel/skylake/acpi.c
+@@ -12,6 +12,7 @@
+ #include <intelblocks/acpi.h>
+ #include <intelblocks/cpulib.h>
+ #include <intelblocks/pmclib.h>
++#include <option.h>
+ #include <soc/cpu.h>
+ #include <soc/msr.h>
+ #include <soc/pm.h>
+@@ -146,6 +147,9 @@ const acpi_cstate_t *soc_get_cstate_map(size_t *entries)
+ 		set = cstate_set_non_s0ix;
+ 	}
+ 
++	if (!get_uint_option("c_states", true))
++		*entries = 1;
++
+ 	for (i = 0; i < *entries; i++) {
+ 		memcpy(&map[i], &cstate_map[set[i]], sizeof(acpi_cstate_t));
+ 		map[i].ctype = i + 1;
+@@ -158,7 +162,7 @@ void soc_power_states_generation(int core_id, int cores_per_package)
+ 	config_t *config = config_of_soc();
+ 
+ 	/* Generate P-state tables */
+-	if (config->eist_enable)
++	if (get_uint_option("eist", config->eist_enable))
+ 		generate_p_state_entries(core_id, cores_per_package);
+ }
+ 
+diff --git a/src/soc/intel/skylake/chip.c b/src/soc/intel/skylake/chip.c
+index c84eb935b9..34dd2b9ce6 100644
+--- a/src/soc/intel/skylake/chip.c
++++ b/src/soc/intel/skylake/chip.c
+@@ -298,12 +298,18 @@ void platform_fsp_silicon_init_params_cb(FSPS_UPD *supd)
+ 	       sizeof(params->PcieRpLtrEnable));
+ 	memcpy(params->PcieRpHotPlug, config->PcieRpHotPlug,
+ 	       sizeof(params->PcieRpHotPlug));
++	const bool clk_pm = get_uint_option("pciexp_clk_pm", true);
+ 	for (i = 0; i < CONFIG_MAX_ROOT_PORTS; i++) {
+ 		params->PcieRpMaxPayload[i] = config->PcieRpMaxPayload[i];
+-		if (config->pcie_rp_aspm[i])
+-			params->PcieRpAspm[i] = config->pcie_rp_aspm[i] - 1;
+-		if (config->pcie_rp_l1substates[i])
+-			params->PcieRpL1Substates[i] = config->pcie_rp_l1substates[i] - 1;
++		const unsigned int aspm = get_uint_option("pciexp_aspm", config->pcie_rp_aspm[i]);
++		const unsigned int l1ss = get_uint_option("pciexp_l1ss",
++							  config->pcie_rp_l1substates[i]);
++		if (aspm)
++			params->PcieRpAspm[i] = aspm - 1;
++		if (l1ss)
++			params->PcieRpL1Substates[i] = l1ss - 1;
++		if (!clk_pm)
++			params->PcieRpClkReqSupport[i] = 0;
+ 	}
+ 
+ 	/*
+@@ -483,8 +489,10 @@ void platform_fsp_silicon_init_params_cb(FSPS_UPD *supd)
+ 	/* Enable PMC XRAM read */
+ 	tconfig->PchPmPmcReadDisable = config->PchPmPmcReadDisable;
+ 
+-	/* Enable/Disable EIST */
+-	tconfig->Eist = config->eist_enable;
++	/* Must match soc_core_init() */
++	tconfig->Eist = get_uint_option("eist", config->eist_enable);
++	params->TurboMode = tconfig->Eist && get_uint_option("turbo_mode", true);
++	tconfig->Cx = get_uint_option("c_states", true);
+ 
+ 	/* Set TccActivationOffset */
+ 	tconfig->TccActivationOffset = config->tcc_offset;
+diff --git a/src/soc/intel/skylake/cpu.c b/src/soc/intel/skylake/cpu.c
+index 853ad6840e..9c82565784 100644
+--- a/src/soc/intel/skylake/cpu.c
++++ b/src/soc/intel/skylake/cpu.c
+@@ -16,6 +16,7 @@
+ #include <intelblocks/fast_spi.h>
+ #include <intelblocks/mp_init.h>
+ #include <intelblocks/sgx.h>
++#include <option.h>
+ #include <soc/cpu.h>
+ #include <soc/msr.h>
+ #include <soc/pci_devs.h>
+@@ -52,9 +53,13 @@ void cpu_soc_bios_done(void)
+ 	wrmsr(MSR_BIOS_DONE, msr);
+ }
+ 
++/* Read on the BSP before the APs start, since soc_core_init() runs on every core */
++static bool eist_enable;
++static bool turbo_enable;
++static bool c_states_enable;
++
+ static void configure_misc(void)
+ {
+-	config_t *conf = config_of_soc();
+ 	msr_t msr;
+ 
+ 	msr = rdmsr(IA32_MISC_ENABLE);
+@@ -63,7 +68,7 @@ static void configure_misc(void)
+ 	wrmsr(IA32_MISC_ENABLE, msr);
+ 
+ 	/* Set EIST status */
+-	cpu_set_eist(conf->eist_enable);
++	cpu_set_eist(eist_enable);
+ 
+ 	/* Disable Thermal interrupts */
+ 	msr.lo = 0;
+@@ -87,6 +92,18 @@ static void configure_c_states(void)
+ {
+ 	msr_t msr;
+ 
++	/* FSP skips its CPU setup since coreboot starts the APs, so limit C-states here. */
++	if (!c_states_enable) {
++		msr = rdmsr(MSR_PKG_CST_CONFIG_CONTROL);
++		if (msr.lo & CST_CFG_LOCK_MASK) {
++			/* Writing a locked MSR faults */
++			printk(BIOS_WARNING, "C-states: MSR_PKG_CST_CONFIG_CONTROL is locked\n");
++		} else {
++			msr.lo &= ~0xf;	/* Package C-state limit: C0/C1 */
++			wrmsr(MSR_PKG_CST_CONFIG_CONTROL, msr);
++		}
++	}
++
+ 	/* C-state Interrupt Response Latency Control 0 - package C3 latency */
+ 	msr.hi = 0;
+ 	msr.lo = IRTL_VALID | IRTL_1024_NS | C_STATE_LATENCY_CONTROL_0_LIMIT;
+@@ -153,8 +170,10 @@ void soc_core_init(struct device *cpu)
+ 	/* Set energy policy */
+ 	set_energy_perf_bias(ENERGY_POLICY_NORMAL);
+ 
+-	/* Enable Turbo */
+-	enable_turbo();
++	if (turbo_enable)
++		enable_turbo();
++	else
++		disable_turbo();
+ }
+ 
+ static void per_cpu_smm_trigger(void)
+@@ -217,6 +236,12 @@ static void post_mp_init(void)
+ 
+ static void soc_fsp_load(void)
+ {
++	const config_t *conf = config_of_soc();
++
++	eist_enable = get_uint_option("eist", conf->eist_enable);
++	/* Turbo needs EIST */
++	turbo_enable = eist_enable && get_uint_option("turbo_mode", true);
++	c_states_enable = get_uint_option("c_states", true);
+ 	fsps_load();
+ }
+ 
+diff --git a/src/soc/intel/skylake/include/soc/cfr.h b/src/soc/intel/skylake/include/soc/cfr.h
+index a2255fda32..7ab2ba9cb6 100644
+--- a/src/soc/intel/skylake/include/soc/cfr.h
++++ b/src/soc/intel/skylake/include/soc/cfr.h
+@@ -8,6 +8,7 @@
+ #define SKYLAKE_CFR_H
+ 
+ #include <drivers/option/cfr_frontend.h>
++#include <soc/pm.h>
+ #include <soc/soc_chip.h>
+ 
+ /* IGD Enabled */
+@@ -69,4 +70,42 @@ static const struct sm_object vtd = SM_DECLARE_BOOL({
+ 	.default_value	= true,
+ });
+ 
++static const struct sm_object eist = SM_DECLARE_BOOL({
++	.opt_name	= "eist",
++	.ui_name	= "SpeedStep",
++	.ui_helptext	= "Enable or disable SpeedStep. When enabled, the OS can switch"
++			  " the processor between performance states. When disabled, the"
++			  " processor stays in its highest performance state.",
++	.default_value	= true,
++});
++
++static const struct sm_object turbo_mode = SM_DECLARE_BOOL({
++	.opt_name	= "turbo_mode",
++	.ui_name	= "Turbo Boost",
++	.ui_helptext	= "Enable or disable Turbo Boost. When enabled, the processor"
++			  " can run above its base frequency.",
++	.default_value	= true,
++}, WITH_DEP_VALUES(&eist, true));
++
++static const struct sm_object c_states = SM_DECLARE_BOOL({
++	.opt_name	= "c_states",
++	.ui_name	= "CPU power states (C-states)",
++	.ui_helptext	= "Specify whether C-states are supported.",
++	.default_value	= true,
++});
++
++static const struct sm_object deep_sx = SM_DECLARE_ENUM({
++	.opt_name	= "deep_sx",
++	.ui_name	= "Deep Sleep Control",
++	.ui_helptext	= "Set how much power the system saves while shut down (S5) or"
++			  " hibernating (S4). Enabling it saves more power, but Wake-on-LAN no"
++			  " longer works in those states.",
++	.default_value	= DEEP_SX_DISABLED,
++	.values		= (const struct sm_enum_value[]) {
++				{ "Disabled",		DEEP_SX_DISABLED	},
++				{ "Enabled in S5 only",	DEEP_SX_S5		},
++				{ "Enabled in S4 and S5", DEEP_SX_S4_S5		},
++				SM_ENUM_VALUE_END				},
++});
++
+ #endif /* SKYLAKE_CFR_H */
+diff --git a/src/soc/intel/skylake/include/soc/pm.h b/src/soc/intel/skylake/include/soc/pm.h
+index f0ce146562..a98756b675 100644
+--- a/src/soc/intel/skylake/include/soc/pm.h
++++ b/src/soc/intel/skylake/include/soc/pm.h
+@@ -189,4 +189,10 @@ static inline int deep_s5_enabled(void)
+ /* STM Support */
+ uint16_t get_pmbase(void);
+ 
++enum deep_sx_option {
++	DEEP_SX_DISABLED,
++	DEEP_SX_S5,
++	DEEP_SX_S4_S5,
++};
++
+ #endif
+diff --git a/src/soc/intel/skylake/pmc.c b/src/soc/intel/skylake/pmc.c
+index 7c8d7c1068..27028811a1 100644
+--- a/src/soc/intel/skylake/pmc.c
++++ b/src/soc/intel/skylake/pmc.c
+@@ -9,6 +9,8 @@
+ #include <intelblocks/pmc.h>
+ #include <intelblocks/pmclib.h>
+ #include <intelblocks/rtc.h>
++#include <limits.h>
++#include <option.h>
+ #include <soc/pci_devs.h>
+ #include <soc/pm.h>
+ #include <static.h>
+@@ -92,8 +94,19 @@ void pmc_soc_init(struct device *dev)
+ 
+ 	pmc_set_acpi_mode();
+ 
+-	config_deep_s3(config->deep_s3_enable_ac, config->deep_s3_enable_dc);
+-	config_deep_s5(config->deep_s5_enable_ac, config->deep_s5_enable_dc);
++	const unsigned int deep_sx = get_uint_option("deep_sx", UINT_MAX);
++	if (deep_sx == UINT_MAX) {
++		config_deep_s3(config->deep_s3_enable_ac, config->deep_s3_enable_dc);
++		config_deep_s5(config->deep_s5_enable_ac, config->deep_s5_enable_dc);
++	} else {
++		const bool s5 = deep_sx != DEEP_SX_DISABLED;
++		const bool s4 = deep_sx == DEEP_SX_S4_S5;
++		config_deep_s3(false, false);
++		config_deep_s5(s5, s5);
++		/* config_deep_s5() treats S4 like S5; "S5 only" turns S4 back off. */
++		config_deep_sX(S4_PWRGATE_POL, S4AC_GATE_SUS, 4, s4);
++		config_deep_sX(S4_PWRGATE_POL, S4DC_GATE_SUS, 4, s4);
++	}
+ 	config_deep_sx(config->deep_sx_config);
+ 
+ 	/* Clear registers that contain write-1-to-clear bits. */

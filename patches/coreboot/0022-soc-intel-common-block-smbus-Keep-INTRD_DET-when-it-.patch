@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 15:17:00 +0200
+Subject: [PATCH 22/29] soc/intel/common/block/smbus: Keep INTRD_DET when it
+ isn't an SMI
+
+The PCH latches a case opening in TCO2_STS INTRD_DET, in the RTC well,
+so it survives power-off. tco_reset_status() clears it on every boot
+along with the other TCO status bits, so a mainboard that doesn't route
+INTRUDER# to SMI never sees it: the status is only printed.
+
+When SOC_INTEL_COMMON_BLOCK_SMM_TCO_INTRUDER_SMI_ENABLE is off, leave
+INTRD_DET set, so the mainboard can report the intrusion until the user
+clears it.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/soc/intel/common/block/smbus/tco.c | 7 ++++++-
+ src/soc/intel/common/block/smm/Kconfig | 2 ++
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/soc/intel/common/block/smbus/tco.c b/src/soc/intel/common/block/smbus/tco.c
+index fa462e0921..dde63bd85a 100644
+--- a/src/soc/intel/common/block/smbus/tco.c
++++ b/src/soc/intel/common/block/smbus/tco.c
+@@ -67,6 +67,7 @@ uint32_t tco_reset_status(void)
+ {
+ 	uint16_t tco1_sts;
+ 	uint16_t tco2_sts;
++	uint16_t clear;
+ 
+ 	/* TCO Status 1 register */
+ 	tco1_sts = tco_read_reg(TCO1_STS);
+@@ -83,7 +84,11 @@ uint32_t tco_reset_status(void)
+ 
+ 	/* TCO Status 2 register */
+ 	tco2_sts = tco_read_reg(TCO2_STS);
+-	tco_write_reg(TCO2_STS, tco2_sts | TCO2_STS_SECOND_TO);
++	clear = tco2_sts | TCO2_STS_SECOND_TO;
++	/* Not routed to SMI: leave it latched for the mainboard */
++	if (!CONFIG(SOC_INTEL_COMMON_BLOCK_SMM_TCO_INTRUDER_SMI_ENABLE))
++		clear &= ~TCO2_INTRD_DET;
++	tco_write_reg(TCO2_STS, clear);
+ 
+ 	if (CONFIG(ACPI_WDAT_WDT))
+ 		tco_write_reg(TCO_MESSAGE1, tco2_sts & TCO2_STS_SECOND_TO);
+diff --git a/src/soc/intel/common/block/smm/Kconfig b/src/soc/intel/common/block/smm/Kconfig
+index 4d86b22138..ef9d3e3eeb 100644
+--- a/src/soc/intel/common/block/smm/Kconfig
++++ b/src/soc/intel/common/block/smm/Kconfig
+@@ -46,6 +46,8 @@ config SOC_INTEL_COMMON_BLOCK_SMM_TCO_INTRUDER_SMI_ENABLE
+ 	  When enabled, route the TCO INTRUDER# event to SMI.
+ 	  Some boards may see INTRUDER# asserted continuously. Routing it to
+ 	  SMI would then cause an SMI storm and prevent boot.
++	  When disabled, INTRD_DET stays latched in the RTC well, for the
++	  mainboard to report the intrusion and clear it.
+ 
+ config SOC_INTEL_COMMON_BLOCK_SMM_S5_DELAY_MS
+ 	int

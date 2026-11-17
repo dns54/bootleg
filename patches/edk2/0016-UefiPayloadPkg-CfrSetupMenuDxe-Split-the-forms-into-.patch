@@ -1,0 +1,415 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 22:43:45 +0200
+Subject: [PATCH 16/25] UefiPayloadPkg/CfrSetupMenuDxe: Split the forms into
+ two menus
+
+All CFR forms share one page, the Platform Setup Menu, so the options
+for this machine's hardware sit next to the firmware's own features.
+
+Put forms flagged CFR_OPTFLAG_PLATFORM in the Platform Setup Menu and
+the others in a new System Features menu, both in Device Manager. Each
+menu is its own package list, as Device Manager only looks at the first
+formset of one, and is published only when it gets forms. A form stays
+a section of its menu, as before.
+
+Option variables don't change, only where the options show up.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../CfrSetupMenuDxe/CfrSetupMenuDxe.inf       |   1 +
+ UefiPayloadPkg/CfrSetupMenuDxe/SetupMenu.c    |  43 ++++++--
+ UefiPayloadPkg/CfrSetupMenuDxe/SetupMenu.h    |  20 +++-
+ UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuCfr.c | 104 ++++++++++++++----
+ UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuHii.c |   5 +-
+ .../CfrSetupMenuDxe/SetupMenuNVDataStruc.h    |   5 +
+ .../CfrSetupMenuDxe/SetupMenuStrings.uni      |   4 +
+ .../CfrSetupMenuDxe/SystemFeaturesVfr.Vfr     |  31 ++++++
+ .../Include/Guid/CfrSetupMenuGuid.h           |   1 +
+ 9 files changed, 178 insertions(+), 36 deletions(-)
+ create mode 100644 UefiPayloadPkg/CfrSetupMenuDxe/SystemFeaturesVfr.Vfr
+
+diff --git a/UefiPayloadPkg/CfrSetupMenuDxe/CfrSetupMenuDxe.inf b/UefiPayloadPkg/CfrSetupMenuDxe/CfrSetupMenuDxe.inf
+index ceaa96bee3..f4aaf4edbe 100644
+--- a/UefiPayloadPkg/CfrSetupMenuDxe/CfrSetupMenuDxe.inf
++++ b/UefiPayloadPkg/CfrSetupMenuDxe/CfrSetupMenuDxe.inf
+@@ -20,6 +20,7 @@
+   SetupMenuCfr.c
+   SetupMenuHii.c
+   SetupMenuVfr.Vfr
++  SystemFeaturesVfr.Vfr
+   SetupMenuStrings.uni
+ 
+ [Packages]
+diff --git a/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenu.c b/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenu.c
+index 4c47531505..07eae941bc 100644
+--- a/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenu.c
++++ b/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenu.c
+@@ -28,6 +28,8 @@ CfrSetupMenuEntryPoint (
+   )
+ {
+   EFI_STATUS  Status;
++  BOOLEAN     PlatformForms;
++  BOOLEAN     FeatureForms;
+ 
+   //
+   // If the bootloader did not provide any CFR forms, do not register the menu.
+@@ -56,16 +58,31 @@ CfrSetupMenuEntryPoint (
+   ASSERT_EFI_ERROR (Status);
+ 
+   //
+-  // Publish our HII data.
++  // Publish our HII data: a package list per formset, as Device Manager only looks at a package
++  // list's first formset. Only the formsets that get forms, so neither shows up empty.
+   //
+-  mSetupMenuPrivate.HiiHandle = HiiAddPackages (
+-                                  &mSetupMenuFormsetGuid,
+-                                  mSetupMenuPrivate.DriverHandle,
+-                                  SetupMenuVfrBin,
+-                                  CfrSetupMenuDxeStrings,
+-                                  NULL
+-                                  );
+-  ASSERT (mSetupMenuPrivate.HiiHandle != NULL);
++  CfrFindForms (&PlatformForms, &FeatureForms);
++  if (PlatformForms) {
++    mSetupMenuPrivate.PlatformHiiHandle = HiiAddPackages (
++                                            &mSetupMenuFormsetGuid,
++                                            mSetupMenuPrivate.DriverHandle,
++                                            SetupMenuVfrBin,
++                                            CfrSetupMenuDxeStrings,
++                                            NULL
++                                            );
++    ASSERT (mSetupMenuPrivate.PlatformHiiHandle != NULL);
++  }
++
++  if (FeatureForms) {
++    mSetupMenuPrivate.FeaturesHiiHandle = HiiAddPackages (
++                                            &mSystemFeaturesFormsetGuid,
++                                            mSetupMenuPrivate.DriverHandle,
++                                            SystemFeaturesVfrBin,
++                                            CfrSetupMenuDxeStrings,
++                                            NULL
++                                            );
++    ASSERT (mSetupMenuPrivate.FeaturesHiiHandle != NULL);
++  }
+ 
+   //
+   // Insert runtime components from bootloader's CFR table.
+@@ -112,7 +129,13 @@ CfrSetupMenuUnload (
+   //
+   // Remove our HII data
+   //
+-  HiiRemovePackages (mSetupMenuPrivate.HiiHandle);
++  if (mSetupMenuPrivate.PlatformHiiHandle != NULL) {
++    HiiRemovePackages (mSetupMenuPrivate.PlatformHiiHandle);
++  }
++
++  if (mSetupMenuPrivate.FeaturesHiiHandle != NULL) {
++    HiiRemovePackages (mSetupMenuPrivate.FeaturesHiiHandle);
++  }
+ 
+   CfrCleanupLockAtBoot ();
+ 
+diff --git a/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenu.h b/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenu.h
+index 568226b7d8..649a6d7acc 100644
+--- a/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenu.h
++++ b/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenu.h
+@@ -19,6 +19,7 @@
+ extern EDKII_VARIABLE_POLICY_PROTOCOL  *mVariablePolicy;
+ 
+ extern UINT8  SetupMenuVfrBin[];
++extern UINT8  SystemFeaturesVfrBin[];
+ 
+ #define SETUP_MENU_CALLBACK_DATA_SIGNATURE SIGNATURE_32 ('D', 'M', 'C', 'B')
+ 
+@@ -28,7 +29,9 @@ typedef struct {
+   //
+   // HII relative handles
+   //
+-  EFI_HII_HANDLE                  HiiHandle;
++  EFI_HII_HANDLE                  HiiHandle;          // The formset being built
++  EFI_HII_HANDLE                  PlatformHiiHandle;  // Platform Setup Menu
++  EFI_HII_HANDLE                  FeaturesHiiHandle;  // System Features
+   EFI_HANDLE                      DriverHandle;
+ 
+   //
+@@ -44,6 +47,7 @@ typedef struct {
+ 
+ extern SETUP_MENU_CALLBACK_DATA  mSetupMenuPrivate;
+ extern EFI_GUID                  mSetupMenuFormsetGuid;
++extern EFI_GUID                  mSystemFeaturesFormsetGuid;
+ extern HII_VENDOR_DEVICE_PATH    mSetupMenuHiiVendorDevicePath;
+ 
+ /**
+@@ -56,6 +60,20 @@ CfrCreateRuntimeComponents (
+   VOID
+   );
+ 
++/**
++  Report which kinds of CFR forms the bootloader provided.
++
++  @param[out] PlatformForms  Forms flagged CFR_OPTFLAG_PLATFORM, for the Platform Setup Menu.
++  @param[out] FeatureForms   Other forms, for System Features.
++
++**/
++VOID
++EFIAPI
++CfrFindForms (
++  OUT BOOLEAN  *PlatformForms,
++  OUT BOOLEAN  *FeatureForms
++  );
++
+ /**
+   Register a ReadyToBoot callback that write-locks CFR variables marked
+   CFR_OPTFLAG_LOCK_AT_BOOT.
+diff --git a/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuCfr.c b/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuCfr.c
+index 6dc441f5c8..a0dc558c03 100644
+--- a/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuCfr.c
++++ b/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuCfr.c
+@@ -1034,7 +1034,39 @@ CfrProcessCharacterOption (
+ }
+ 
+ /**
+-  Create runtime components by iterating CFR forms.
++  Report which kinds of CFR forms the bootloader provided.
++
++  @param[out] PlatformForms  Forms flagged CFR_OPTFLAG_PLATFORM, for the Platform Setup Menu.
++  @param[out] FeatureForms   Other forms, for System Features.
++
++**/
++VOID
++EFIAPI
++CfrFindForms (
++  OUT BOOLEAN  *PlatformForms,
++  OUT BOOLEAN  *FeatureForms
++  )
++{
++  EFI_HOB_GUID_TYPE  *GuidHob;
++  CFR_OPTION_FORM    *Form;
++
++  *PlatformForms = FALSE;
++  *FeatureForms  = FALSE;
++  for (GuidHob = GetFirstGuidHob (&gEfiCfrSetupMenuFormGuid); GuidHob != NULL;
++       GuidHob = GetNextGuidHob (&gEfiCfrSetupMenuFormGuid, GET_NEXT_HOB (GuidHob)))
++  {
++    Form = GET_GUID_HOB_DATA (GuidHob);
++    if (Form->flags & CFR_OPTFLAG_PLATFORM) {
++      *PlatformForms = TRUE;
++    } else {
++      *FeatureForms = TRUE;
++    }
++  }
++}
++
++/**
++  Create runtime components by iterating CFR forms. Forms flagged CFR_OPTFLAG_PLATFORM go to the
++  Platform Setup Menu, the others to System Features.
+ 
+ **/
+ VOID
+@@ -1043,6 +1075,8 @@ CfrCreateRuntimeComponents (
+   VOID
+   )
+ {
++  VOID                *StartOpCodeHandles[2];
++  UINTN               Index;
+   VOID                *StartOpCodeHandle;
+   VOID                *EndOpCodeHandle;
+   EFI_IFR_GUID_LABEL  *StartLabel;
+@@ -1057,22 +1091,25 @@ CfrCreateRuntimeComponents (
+   //
+   // Allocate GUIDed markers at runtime component offset in IFR
+   //
+-  StartOpCodeHandle = HiiAllocateOpCodeHandle ();
+-  ASSERT (StartOpCodeHandle != NULL);
+ 
+   EndOpCodeHandle = HiiAllocateOpCodeHandle ();
+   ASSERT (EndOpCodeHandle != NULL);
+ 
+-  StartLabel = (EFI_IFR_GUID_LABEL *)HiiCreateGuidOpCode (
+-                                       StartOpCodeHandle,
+-                                       &gEfiIfrTianoGuid,
+-                                       NULL,
+-                                       sizeof (EFI_IFR_GUID_LABEL)
+-                                       );
+-  ASSERT (StartLabel != NULL);
++  for (Index = 0; Index < ARRAY_SIZE (StartOpCodeHandles); Index++) {
++    StartOpCodeHandles[Index] = HiiAllocateOpCodeHandle ();
++    ASSERT (StartOpCodeHandles[Index] != NULL);
+ 
+-  StartLabel->ExtendOpCode = EFI_IFR_EXTEND_OP_LABEL;
+-  StartLabel->Number       = LABEL_RT_COMP_START;
++    StartLabel = (EFI_IFR_GUID_LABEL *)HiiCreateGuidOpCode (
++                                         StartOpCodeHandles[Index],
++                                         &gEfiIfrTianoGuid,
++                                         NULL,
++                                         sizeof (EFI_IFR_GUID_LABEL)
++                                         );
++    ASSERT (StartLabel != NULL);
++
++    StartLabel->ExtendOpCode = EFI_IFR_EXTEND_OP_LABEL;
++    StartLabel->Number       = LABEL_RT_COMP_START;
++  }
+ 
+   EndLabel = (EFI_IFR_GUID_LABEL *)HiiCreateGuidOpCode (
+                                        EndOpCodeHandle,
+@@ -1092,6 +1129,14 @@ CfrCreateRuntimeComponents (
+   while (GuidHob != NULL) {
+     CfrFormHob = GET_GUID_HOB_DATA (GuidHob);
+ 
++    //
++    // [0]: Platform Setup Menu, [1]: System Features
++    //
++    Index                       = (CfrFormHob->flags & CFR_OPTFLAG_PLATFORM) ? 0 : 1;
++    StartOpCodeHandle           = StartOpCodeHandles[Index];
++    mSetupMenuPrivate.HiiHandle = Index == 0 ? mSetupMenuPrivate.PlatformHiiHandle :
++                                  mSetupMenuPrivate.FeaturesHiiHandle;
++
+     ProcessedLength = 0;
+     CfrProcessFormOption (
+       CfrFormHob,
+@@ -1156,18 +1201,29 @@ CfrCreateRuntimeComponents (
+     GuidHob = GetNextGuidHob (&gEfiCfrSetupMenuFormGuid, GET_NEXT_HOB (GuidHob));
+   }
+ 
+-  //
+-  // Submit updates
+-  //
+-  Status = HiiUpdateForm (
+-             mSetupMenuPrivate.HiiHandle,
+-             &mSetupMenuFormsetGuid,
+-             SETUP_MENU_FORM_ID,
+-             StartOpCodeHandle,
+-             EndOpCodeHandle
+-             );
+-  ASSERT_EFI_ERROR (Status);
++  if (mSetupMenuPrivate.PlatformHiiHandle != NULL) {
++    Status = HiiUpdateForm (
++               mSetupMenuPrivate.PlatformHiiHandle,
++               &mSetupMenuFormsetGuid,
++               SETUP_MENU_FORM_ID,
++               StartOpCodeHandles[0],
++               EndOpCodeHandle
++               );
++    ASSERT_EFI_ERROR (Status);
++  }
++
++  if (mSetupMenuPrivate.FeaturesHiiHandle != NULL) {
++    Status = HiiUpdateForm (
++               mSetupMenuPrivate.FeaturesHiiHandle,
++               &mSystemFeaturesFormsetGuid,
++               SETUP_MENU_FORM_ID,
++               StartOpCodeHandles[1],
++               EndOpCodeHandle
++               );
++    ASSERT_EFI_ERROR (Status);
++  }
+ 
+-  HiiFreeOpCodeHandle (StartOpCodeHandle);
++  HiiFreeOpCodeHandle (StartOpCodeHandles[0]);
++  HiiFreeOpCodeHandle (StartOpCodeHandles[1]);
+   HiiFreeOpCodeHandle (EndOpCodeHandle);
+ }
+diff --git a/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuHii.c b/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuHii.c
+index e725894a40..c87142a1a7 100644
+--- a/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuHii.c
++++ b/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuHii.c
+@@ -23,6 +23,8 @@ SETUP_MENU_CALLBACK_DATA  mSetupMenuPrivate = {
+   SETUP_MENU_CALLBACK_DATA_SIGNATURE,
+   NULL,
+   NULL,
++  NULL,
++  NULL,
+   {
+     SetupMenuExtractConfig,
+     SetupMenuRouteConfig,
+@@ -30,7 +32,8 @@ SETUP_MENU_CALLBACK_DATA  mSetupMenuPrivate = {
+   }
+ };
+ 
+-EFI_GUID  mSetupMenuFormsetGuid = SETUP_MENU_FORMSET_GUID;
++EFI_GUID  mSetupMenuFormsetGuid      = SETUP_MENU_FORMSET_GUID;
++EFI_GUID  mSystemFeaturesFormsetGuid = SYSTEM_FEATURES_FORMSET_GUID;
+ 
+ HII_VENDOR_DEVICE_PATH  mSetupMenuHiiVendorDevicePath = {
+   {
+diff --git a/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuNVDataStruc.h b/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuNVDataStruc.h
+index 1e3b2a80e1..dcea9774d0 100644
+--- a/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuNVDataStruc.h
++++ b/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuNVDataStruc.h
+@@ -14,6 +14,11 @@
+     0x93E6FCD9, 0x8E17, 0x43DF, { 0xB7, 0xF0, 0x91, 0x3E, 0x58, 0xB1, 0xA7, 0x89 } \
+   }
+ 
++#define SYSTEM_FEATURES_FORMSET_GUID \
++  { \
++    0x5B4B0C3E, 0x2E61, 0x4A4E, { 0x9B, 0x52, 0x3C, 0x87, 0x1D, 0x7A, 0x60, 0x2F } \
++  }
++
+ #define SETUP_MENU_FORM_ID   0x0001
+ #define LABEL_RT_COMP_START  0x0001
+ #define CFR_COMPONENT_START  0x1000
+diff --git a/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuStrings.uni b/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuStrings.uni
+index 708e224e5f..8868c71690 100644
+--- a/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuStrings.uni
++++ b/UefiPayloadPkg/CfrSetupMenuDxe/SetupMenuStrings.uni
+@@ -9,6 +9,10 @@
+                             #language fr-FR  "Platform Setup Menu"
+ #string STR_CFR_MENU_HELP   #language en-US  "This menu lets you configure the bootloader options"
+                             #language fr-FR  "This menu lets you configure the bootloader options"
++#string STR_SYSTEM_FEATURES_TITLE  #language en-US  "System Features"
++                                   #language fr-FR  "System Features"
++#string STR_SYSTEM_FEATURES_HELP   #language en-US  "Configure the firmware's features"
++                                   #language fr-FR  "Configure the firmware's features"
+ #string STR_EMPTY_STRING    #language en-US  ""
+                             #language fr-FR  ""
+ #string STR_INVALID_STRING  #language en-US  "INVALID"
+diff --git a/UefiPayloadPkg/CfrSetupMenuDxe/SystemFeaturesVfr.Vfr b/UefiPayloadPkg/CfrSetupMenuDxe/SystemFeaturesVfr.Vfr
+new file mode 100644
+index 0000000000..20f14dfc6e
+--- /dev/null
++++ b/UefiPayloadPkg/CfrSetupMenuDxe/SystemFeaturesVfr.Vfr
+@@ -0,0 +1,31 @@
++/** @file
++  System Features formset: the CFR forms that aren't platform-specific.
++
++  Copyright (c) 2023, 9elements GmbH.<BR>
++  SPDX-License-Identifier: BSD-2-Clause-Patent
++
++**/
++
++#include <Uefi/UefiMultiPhase.h>
++#include <Guid/HiiPlatformSetupFormset.h>
++#include "SetupMenuNVDataStruc.h"
++
++formset
++  guid      = SYSTEM_FEATURES_FORMSET_GUID,
++  title     = STRING_TOKEN(STR_SYSTEM_FEATURES_TITLE),
++  help      = STRING_TOKEN(STR_SYSTEM_FEATURES_HELP),
++  classguid = EFI_HII_PLATFORM_SETUP_FORMSET_GUID,
++
++  form formid = SETUP_MENU_FORM_ID,
++    title = STRING_TOKEN(STR_SYSTEM_FEATURES_TITLE);
++
++    /**
++      Sections for runtime components
++
++    **/
++    label LABEL_RT_COMP_START;
++    label LABEL_RT_COMP_END;
++
++  endform;
++
++endformset;
+diff --git a/UefiPayloadPkg/Include/Guid/CfrSetupMenuGuid.h b/UefiPayloadPkg/Include/Guid/CfrSetupMenuGuid.h
+index e4ead82d61..96a345f2a7 100644
+--- a/UefiPayloadPkg/Include/Guid/CfrSetupMenuGuid.h
++++ b/UefiPayloadPkg/Include/Guid/CfrSetupMenuGuid.h
+@@ -41,6 +41,7 @@ enum cfr_option_flags {
+   CFR_OPTFLAG_VOLATILE     = 1 << 3,
+   CFR_OPTFLAG_RUNTIME      = 1 << 4,
+   CFR_OPTFLAG_LOCK_AT_BOOT = 1 << 5,
++  CFR_OPTFLAG_PLATFORM     = 1 << 6,
+ };
+ 
+ #define CB_TAG_CFR_VARCHAR_OPT_NAME     0x0007

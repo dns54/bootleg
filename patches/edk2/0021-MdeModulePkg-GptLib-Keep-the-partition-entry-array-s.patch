@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 05:26:52 +0200
+Subject: [PATCH 21/25] MdeModulePkg/GptLib: Keep the partition entry array
+ size in 32 bits
+
+PartitionValidGptTable() checks that NumberOfPartitionEntries *
+SizeOfPartitionEntry doesn't overflow MAX_UINTN, but PartitionDxe,
+Tcg2 measured boot and GptLib itself compute that product from two
+UINT32 fields, in 32 bits. On X64 a header with 0x2000001 entries of
+128 bytes passes the check while the product wraps to 128: the entry
+array is allocated and CRC-checked at 128 bytes, and the entries are
+then read up to 4 GiB past it.
+
+A GPT disk is parsed as soon as it is connected, USB sticks included,
+so a crafted one can crash the firmware or leak heap contents.
+
+Bound the product by MAX_UINT32, so every 32-bit computation of it is
+exact. Real disks use 128 entries of 128 bytes.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ MdeModulePkg/Library/GptLib/Gpt.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/MdeModulePkg/Library/GptLib/Gpt.c b/MdeModulePkg/Library/GptLib/Gpt.c
+index e83e9806ef..015a0fa146 100644
+--- a/MdeModulePkg/Library/GptLib/Gpt.c
++++ b/MdeModulePkg/Library/GptLib/Gpt.c
+@@ -201,7 +201,7 @@ PartitionValidGptTable (
+   // are later used to read and size the partition entry array.
+   //
+   if ((PartHdr->PartitionEntryLBA > DivU64x32 (MAX_UINT64, BlockSize)) ||
+-      (PartHdr->NumberOfPartitionEntries > DivU64x32 (MAX_UINTN, PartHdr->SizeOfPartitionEntry)))
++      (PartHdr->NumberOfPartitionEntries > DivU64x32 (MAX_UINT32, PartHdr->SizeOfPartitionEntry)))
+   {
+     FreePool (PartHdr);
+     return FALSE;

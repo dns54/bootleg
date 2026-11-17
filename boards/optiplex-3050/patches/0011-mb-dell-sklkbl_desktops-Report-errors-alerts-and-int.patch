@@ -1,0 +1,521 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:17:19 +0200
+Subject: [PATCH 11/12] mb/dell/sklkbl_desktops: Report errors, alerts and
+ intrusion as Dell does
+
+A headless machine that stops in firmware, or boots with a problem,
+gives no hint why. Report it the way Dell's OptiPlexes of this
+generation do.
+
+Diagnostic codes: implement die_notify(). Blink Dell's code on the
+power LED in two groups (Dell KB 000126021) through the SCH5555 LED
+register until power-off, and play the 1-3-2 memory beep code for a
+memory error. Codes: 3,3 no memory (no SPD found), 2,7 memory failure
+(any romstage error, FSP-M's memory training first among them), 3,6
+system board failure (any other stage). The memory code always beeps,
+whatever the speaker and Beep Codes options say: Dell keeps that one
+beep code and has no option to silence it.
+
+Chassis intrusion: the case switch drives the PCH's INTRUDER# pin,
+which latches INTRD_DET in TCO2_STS, in the RTC well, so it records an
+opened case even while the system is off. coreboot leaves it set when
+INTRUDER# isn't routed to SMI (bootleg's defconfig turns that SMI off).
+Add Dell's "Chassis Intrusion" (Disabled / Enabled / On-Silent, default
+Enabled) and "Clear Intrusion Warning" options. While an intrusion is
+latched and the option isn't Disabled, measure it into PCR 1, so
+secrets sealed to PCR 1 don't unseal. With Enabled, it is also shown as
+a POST alert. Clear Intrusion Warning clears the latch on the next
+boot. This runs at BS_DEV_INIT_CHIPS, before the SPI lockdown blocks
+the option writes from outside SMM.
+
+Removing the coin cell clears the latch with the rest of the RTC well.
+So while the option isn't Disabled, also measure a loss of RTC power
+(RTC_BATTERY_DEAD, which coreboot reports on one boot) into PCR 1. A
+battery change then changes PCR 1 once too.
+
+POST alerts: pass the problems coreboot finds before the payload in a
+hidden, volatile CFR number, boot_alerts: a chassis intrusion with
+"Chassis Intrusion" Enabled, a dead RTC battery, a thermal trip on the
+previous boot, and a fan that the SCH5555 monitors stopped or below its
+minimum speed (sch555x_fan_failure(), Dell's "Fan failure"). The
+payload shows them at boot without stopping it.
+
+Beep Codes, shown while the internal speaker is on: Disabled, Errors
+(two short beeps from the payload with an alert, the default) or Errors
+and POST (also one short beep when POST completes without an alert).
+
+All beeps come from the 8254's counter 2, as on Dell, at Dasharo's
+pitches; the memory code is 800 Hz, 300 ms. The ALC3234 comes out of
+reset with its PC beep input, mixers and speaker pin muted: open that
+path to the internal speaker and turn on its EAPD. The memory code
+beeps in romstage, before ramstage initializes the codec, so open the
+path there too: bring the HDA link out of reset at a temporary BAR
+first, and configure the PCH's SPKR pad (GPP_B14) in the bootblock.
+The GPIO table that selects it only runs in ramstage, and until then
+the 8254's output never reached the codec.
+
+A warm reboot doesn't reset the codec, and settings that Linux's
+Realtek driver leaves behind keep the beep off the speaker even with
+that path open. Start the 3050's verb table with AZALIA_RESET, as many
+boards do, so every boot starts from the codec's defaults.
+
+FSP gates the 8254's clock unless "Legacy 8254 Timer" is on, which
+turns a beep into a click. So the menu leaves that option out, and the
+board builds with USE_LEGACY_8254_TIMER (bootleg's defconfig): the 8254
+always runs, as on Dell's firmware (which has no such option) and
+Dasharo's boards.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../dell/sklkbl_desktops/Makefile.mk          |   1 +
+ src/mainboard/dell/sklkbl_desktops/cfr.c      |  71 ++++++++++-
+ src/mainboard/dell/sklkbl_desktops/diag.c     | 112 ++++++++++++++++++
+ src/mainboard/dell/sklkbl_desktops/diag.h     |  30 +++++
+ .../dell/sklkbl_desktops/intrusion.h          |  12 ++
+ src/mainboard/dell/sklkbl_desktops/ramstage.c |  70 ++++++++++-
+ .../variants/optiplex_3050/early_gpio.c       |   1 +
+ .../variants/optiplex_3050/hda_verb.c         |   5 +-
+ .../variants/optiplex_3050/romstage.c         |   6 +
+ 9 files changed, 304 insertions(+), 4 deletions(-)
+ create mode 100644 src/mainboard/dell/sklkbl_desktops/diag.c
+ create mode 100644 src/mainboard/dell/sklkbl_desktops/diag.h
+ create mode 100644 src/mainboard/dell/sklkbl_desktops/intrusion.h
+
+diff --git a/src/mainboard/dell/sklkbl_desktops/Makefile.mk b/src/mainboard/dell/sklkbl_desktops/Makefile.mk
+index 3342274289..ddf7f8f950 100644
+--- a/src/mainboard/dell/sklkbl_desktops/Makefile.mk
++++ b/src/mainboard/dell/sklkbl_desktops/Makefile.mk
+@@ -1,6 +1,7 @@
+ ## SPDX-License-Identifier: GPL-2.0-only
+ 
+ bootblock-y += bootblock.c
++all-y += diag.c
+ bootblock-y += variants/$(VARIANT_DIR)/early_gpio.c
+ 
+ romstage-y += variants/$(VARIANT_DIR)/romstage.c
+diff --git a/src/mainboard/dell/sklkbl_desktops/cfr.c b/src/mainboard/dell/sklkbl_desktops/cfr.c
+index c264ad781c..a809752332 100644
+--- a/src/mainboard/dell/sklkbl_desktops/cfr.c
++++ b/src/mainboard/dell/sklkbl_desktops/cfr.c
+@@ -4,6 +4,8 @@
+ #include <drivers/option/cfr_frontend.h>
+ #include <intelblocks/cfr.h>
+ #include <soc/cfr.h>
++#include "diag.h"
++#include "intrusion.h"
+ 
+ /* coreboot's IGD objects without their dependency on igd_enabled, which isn't in the menu */
+ static const struct sm_object dell_igd_dvmt = SM_DECLARE_ENUM({
+@@ -126,10 +128,64 @@ static const struct sm_object audio = SM_DECLARE_BOOL({
+ static const struct sm_object speaker = SM_DECLARE_BOOL({
+ 	.opt_name	= "speaker",
+ 	.ui_name	= "Enable Internal Speaker",
+-	.ui_helptext	= "Enable or disable the internal speaker.",
++	.ui_helptext	= "Enable or disable the internal speaker. The memory failure code"
++			  " (1-3-2) beeps even when it's disabled.",
+ 	.default_value	= true,
+ }, WITH_DEP_VALUES(&audio, true));
+ 
++static const struct sm_object beep_codes = SM_DECLARE_ENUM({
++	.opt_name	= "beep_codes",
++	.ui_name	= "Beep Codes",
++	.ui_helptext	= "Select which beep codes play on the internal speaker. Errors: two"
++			  " short beeps when an alert is shown at boot. Errors and POST: also"
++			  " one short beep after a POST without alerts. The memory failure code"
++			  " (1-3-2) always beeps.",
++	.default_value	= BEEP_CODES_ERRORS,
++	.values		= (const struct sm_enum_value[]) {
++				{ "Disabled",		BEEP_CODES_DISABLED		},
++				{ "Errors",		BEEP_CODES_ERRORS		},
++				{ "Errors and POST",	BEEP_CODES_ERRORS_AND_POST	},
++				SM_ENUM_VALUE_END					},
++}, WITH_DEP_VALUES(&speaker, true));
++
++static void update_boot_alerts(struct sm_object *new)
++{
++	new->sm_number.default_value = boot_alerts();
++}
++
++static const struct sm_object boot_alerts_value = SM_DECLARE_NUMBER({
++	.flags		= CFR_OPTFLAG_READONLY | CFR_OPTFLAG_VOLATILE | CFR_OPTFLAG_SUPPRESS,
++	.opt_name	= "boot_alerts",
++	.ui_name	= "Boot alerts",
++	.default_value	= 0,
++	.min		= 0,
++	.max		= 0xff,
++	.step		= 1,
++}, WITH_CALLBACK(update_boot_alerts));
++
++static const struct sm_object chassis_intrusion = SM_DECLARE_ENUM({
++	.opt_name	= "chassis_intrusion",
++	.ui_name	= "Chassis Intrusion",
++	.ui_helptext	= "Enable or disable chassis intrusion detection. Enabled: report an"
++			  " intrusion at boot. On-Silent: detect an intrusion but don't report"
++			  " it at boot. Both measure a detected intrusion into PCR 1, and a loss"
++			  " of RTC power (the coin cell removed), which also clears it.",
++	.default_value	= INTRUSION_ENABLED,
++	.values		= (const struct sm_enum_value[]) {
++				{ "Disabled",	INTRUSION_DISABLED	},
++				{ "Enabled",	INTRUSION_ENABLED	},
++				{ "On-Silent",	INTRUSION_ON_SILENT	},
++				SM_ENUM_VALUE_END			},
++});
++
++static const struct sm_object clear_intrusion = SM_DECLARE_BOOL({
++	.opt_name	= "clear_intrusion",
++	.ui_name	= "Clear Intrusion Warning",
++	.ui_helptext	= "Clear a detected chassis intrusion on the next boot. Detection then"
++			  " watches for the next one.",
++	.default_value	= false,
++}, WITH_DEP_VALUES(&chassis_intrusion, INTRUSION_ENABLED, INTRUSION_ON_SILENT));
++
+ static struct sm_obj_form security = {
+ 	.ui_name = "Security Options",
+ 	.obj_list = (const struct sm_object *[]) {
+@@ -212,6 +268,18 @@ static struct sm_obj_form devices = {
+ 		&m2_ssd,
+ 		&audio,
+ 		&speaker,
++		&beep_codes,
++		NULL
++	},
++};
++
++static struct sm_obj_form chassis = {
++	.flags = CFR_OPTFLAG_PLATFORM,
++	.ui_name = "Chassis",
++	.obj_list = (const struct sm_object *[]) {
++		&chassis_intrusion,
++		&clear_intrusion,
++		&boot_alerts_value,
+ 		NULL
+ 	},
+ };
+@@ -225,6 +293,7 @@ static struct sm_obj_form *sm_root[] = {
+ 	&pcie,
+ 	&power,
+ 	&devices,
++	&chassis,
+ 	NULL
+ };
+ 
+diff --git a/src/mainboard/dell/sklkbl_desktops/diag.c b/src/mainboard/dell/sklkbl_desktops/diag.c
+new file mode 100644
+index 0000000000..6afb8a668d
+--- /dev/null
++++ b/src/mainboard/dell/sklkbl_desktops/diag.c
+@@ -0,0 +1,112 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#define __SIMPLE_DEVICE__
++
++#include <arch/io.h>
++#include <console/console.h>
++#include <delay.h>
++#include <device/azalia_device.h>
++#include <device/pci_ops.h>
++#include <device/pnp_ops.h>
++#include <pc80/i8254.h>
++#include <soc/iomap.h>
++#include <soc/pci_devs.h>
++#include <superio/smsc/sch555x/sch555x.h>
++#include "diag.h"
++
++/* SCH5555 LED register: bits 1:0 off/blink/on, bit 2 white instead of amber */
++#define LED_AMBER_ON	0x03
++#define LED_OFF		0x00
++
++static unsigned int code_first, code_second;
++
++void diag_set(unsigned int first, unsigned int second)
++{
++	code_first = first;
++	code_second = second;
++}
++
++static void blink(unsigned int count)
++{
++	for (unsigned int i = 0; i < count; i++) {
++		outb(LED_AMBER_ON, SCH555x_RUNTIME_IOBASE + SCH555x_RUNTIME_LED);
++		mdelay(300);
++		outb(LED_OFF, SCH555x_RUNTIME_IOBASE + SCH555x_RUNTIME_LED);
++		mdelay(300);
++	}
++}
++
++/* Dell's memory failure code 1-3-2, at the pitch of Dasharo's failure beeps */
++static void memory_beeps(void)
++{
++	static const unsigned int groups[] = { 1, 3, 2 };
++
++	for (size_t i = 0; i < ARRAY_SIZE(groups); i++) {
++		for (unsigned int j = 0; j < groups[i]; j++) {
++			beep(800, 300);
++			mdelay(150);
++		}
++		mdelay(500);
++	}
++}
++
++/* PC beep (mixer 0x0b input 4) through mixers 0x0c/0x0d to speaker pin 0x14, muted after reset */
++void diag_open_beep_path(u8 *base)
++{
++	static const u32 verbs[] = {
++		0x00b37417,	/* 0x0b: input 4 (PC beep) unmuted, 0 dB */
++		0x00c37100,	/* 0x0c: input 1 (0x0b) unmuted */
++		0x00d37100,	/* 0x0d: input 1 (0x0b) unmuted */
++		0x0143b000,	/* 0x14: output amp unmuted */
++		0x01470740,	/* 0x14: pin output enabled */
++		0x01470c02,	/* 0x14: EAPD on */
++	};
++
++	azalia_program_verb_table(base, verbs, ARRAY_SIZE(verbs));
++}
++
++/* Memory errors beep in romstage, before ramstage opens the beep path. The BAR is free this early. */
++static void romstage_open_beep_path(void)
++{
++	const pci_devfn_t dev = PCH_DEV_HDA;
++	u8 *const base = (u8 *)EARLY_I2C_BASE_ADDRESS;
++
++	if (pci_read_config16(dev, PCI_VENDOR_ID) == 0xffff)
++		return;
++	pci_write_config32(dev, PCI_BASE_ADDRESS_0, (uintptr_t)base);
++	pci_write_config32(dev, PCI_BASE_ADDRESS_1, 0);
++	pci_or_config16(dev, PCI_COMMAND, PCI_COMMAND_MEMORY);
++	if (azalia_exit_reset(base) != CB_SUCCESS)
++		return;
++	/* The codec asks for an address within 521 us, then needs time to come out of reset */
++	mdelay(10);
++	diag_open_beep_path(base);
++}
++
++void die_notify(void)
++{
++	bool memory;
++
++	if (!code_first) {
++		if (ENV_SEPARATE_ROMSTAGE)
++			diag_set(DIAG_MEMORY_FAILURE);
++		else
++			diag_set(DIAG_BOARD_FAILURE);
++	}
++	memory = (code_first == 3 && code_second == 3) || (code_first == 2 && code_second == 7);
++
++	printk(BIOS_EMERG, "Diagnostic code %u,%u\n", code_first, code_second);
++	/* As on Dell, no option silences the memory code */
++	if (memory) {
++		if (ENV_SEPARATE_ROMSTAGE)
++			romstage_open_beep_path();
++		memory_beeps();
++	}
++
++	for (;;) {
++		blink(code_first);
++		mdelay(1000);
++		blink(code_second);
++		mdelay(3000);
++	}
++}
+diff --git a/src/mainboard/dell/sklkbl_desktops/diag.h b/src/mainboard/dell/sklkbl_desktops/diag.h
+new file mode 100644
+index 0000000000..c471d7c4f7
+--- /dev/null
++++ b/src/mainboard/dell/sklkbl_desktops/diag.h
+@@ -0,0 +1,30 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef MAINBOARD_DIAG_H
++#define MAINBOARD_DIAG_H
++
++/* Dell's diagnostic codes: two groups of amber power LED blinks */
++#define DIAG_NO_MEMORY		3, 3
++#define DIAG_MEMORY_FAILURE	2, 7
++#define DIAG_BOARD_FAILURE	3, 6
++
++#include <types.h>
++
++void diag_set(unsigned int first, unsigned int second);
++void diag_open_beep_path(u8 *base);
++
++enum beep_codes {
++	BEEP_CODES_DISABLED,
++	BEEP_CODES_ERRORS,
++	BEEP_CODES_ERRORS_AND_POST,
++};
++
++/* Same bits in edk2's BootAlerts.c */
++#define BOOT_ALERT_INTRUSION	(1 << 0)
++#define BOOT_ALERT_RTC_BATTERY	(1 << 1)
++#define BOOT_ALERT_THERMTRIP	(1 << 2)
++#define BOOT_ALERT_FAN		(1 << 3)
++
++unsigned int boot_alerts(void);
++
++#endif
+diff --git a/src/mainboard/dell/sklkbl_desktops/intrusion.h b/src/mainboard/dell/sklkbl_desktops/intrusion.h
+new file mode 100644
+index 0000000000..1c6da0a127
+--- /dev/null
++++ b/src/mainboard/dell/sklkbl_desktops/intrusion.h
+@@ -0,0 +1,12 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef MAINBOARD_INTRUSION_H
++#define MAINBOARD_INTRUSION_H
++
++enum chassis_intrusion {
++	INTRUSION_DISABLED,
++	INTRUSION_ENABLED,
++	INTRUSION_ON_SILENT,
++};
++
++#endif
+diff --git a/src/mainboard/dell/sklkbl_desktops/ramstage.c b/src/mainboard/dell/sklkbl_desktops/ramstage.c
+index 3f400f82b5..394963d8ba 100644
+--- a/src/mainboard/dell/sklkbl_desktops/ramstage.c
++++ b/src/mainboard/dell/sklkbl_desktops/ramstage.c
+@@ -10,8 +10,13 @@
+ #include <cpu/x86/msr.h>
+ #include <halt.h>
+ #include <intelblocks/pmclib.h>
++#include <intelblocks/tco.h>
+ #include <option.h>
++#include <security/tpm/tspi.h>
+ #include <soc/gpio.h>
++#include <soc/intel/common/tco.h>
++#include <device/pnp_ops.h>
++#include <superio/smsc/sch555x/sch555x.h>
+ #include <soc/pci_devs.h>
+ #include <soc/pm.h>
+ #include <soc/pmc.h>
+@@ -19,7 +24,8 @@
+ #include <soc/soc_chip.h>
+ #include <static.h>
+ #include "../../../include/variant/gpio.h"
+-#include <superio/smsc/sch555x/sch555x.h>
++#include "diag.h"
++#include "intrusion.h"
+ 
+ void mainboard_silicon_init_params(FSP_SIL_UPD *params)
+ {
+@@ -608,6 +614,66 @@ void mainboard_azalia_program_runtime_verbs(u8 *base, u32 viddid)
+ 		AZALIA_PIN_CFG(0, 0x14, AZALIA_PIN_CFG_NC(0)),
+ 	};
+ 
+-	if (viddid == 0x10ec0255 && !get_uint_option("speaker", 1))
++	if (viddid != 0x10ec0255)
++		return;
++	if (!get_uint_option("speaker", 1))
+ 		azalia_program_verb_table(base, speaker_off, ARRAY_SIZE(speaker_off));
++	else if (get_uint_option("beep_codes", BEEP_CODES_ERRORS) != BEEP_CODES_DISABLED)
++		diag_open_beep_path(base);
++}
++
++/*
++ * INTRUDER# latches INTRD_DET in the RTC well, so an opening is recorded with the system off.
++ * coreboot leaves it set while it isn't routed to SMI. Measure it into PCR 1, so secrets sealed
++ * to PCR 1 don't unseal. Pulling the coin cell clears the latch with the rest of the RTC well,
++ * so measure a loss of RTC power too.
++ */
++static bool intrusion_alert;
++
++static void measure_tamper(const char *event, size_t size)
++{
++	struct tpm_digests digests;
++
++	printk(BIOS_WARNING, "Tamper event: %s\n", event);
++	if (CONFIG(TPM_MEASURED_BOOT) && tpm_make_digests(event, size, NULL, &digests))
++		tpm_extend_pcr(1, digests.values, event);
++}
++
++static void chassis_intrusion(void *arg)
++{
++	const char event[] = "Chassis intrusion";
++	const char rtc_event[] = "RTC power lost";
++	const unsigned int mode = get_uint_option("chassis_intrusion", INTRUSION_ENABLED);
++	const struct chipset_power_state *ps = pmc_get_power_state();
++	bool intrusion;
++
++	if (get_uint_option("clear_intrusion", 0)) {
++		tco_write_reg(TCO2_STS, TCO2_INTRD_DET);
++		set_uint_option("clear_intrusion", 0);
++		printk(BIOS_INFO, "Chassis intrusion cleared\n");
++	}
++
++	intrusion = mode != INTRUSION_DISABLED && (tco_read_reg(TCO2_STS) & TCO2_INTRD_DET);
++	intrusion_alert = intrusion && mode == INTRUSION_ENABLED;
++	if (mode != INTRUSION_DISABLED && ps && (ps->gen_pmcon_b & RTC_BATTERY_DEAD))
++		measure_tamper(rtc_event, sizeof(rtc_event));
++	if (intrusion)
++		measure_tamper(event, sizeof(event));
++}
++
++/* Before the SPI lockdown on BS_DEV_RESOURCES exit, which blocks option writes outside SMM */
++BOOT_STATE_INIT_ENTRY(BS_DEV_INIT_CHIPS, BS_ON_EXIT, chassis_intrusion, NULL);
++
++unsigned int boot_alerts(void)
++{
++	const struct chipset_power_state *ps = pmc_get_power_state();
++	unsigned int alerts = intrusion_alert ? BOOT_ALERT_INTRUSION : 0;
++
++	if (ps && (ps->gen_pmcon_b & RTC_BATTERY_DEAD))
++		alerts |= BOOT_ALERT_RTC_BATTERY;
++	if (ps && (ps->gblrst_cause[0] & GBLRST_CAUSE0_THERMTRIP))
++		alerts |= BOOT_ALERT_THERMTRIP;
++	if (sch555x_fan_failure())
++		alerts |= BOOT_ALERT_FAN;
++	return alerts;
+ }
+diff --git a/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/early_gpio.c b/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/early_gpio.c
+index 9bc7013f18..92d6f2a54c 100644
+--- a/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/early_gpio.c
++++ b/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/early_gpio.c
+@@ -12,6 +12,7 @@
+ static const struct pad_config early_gpio_table[] = {
+ 	PAD_CFG_NF(GPP_C8, NONE, DEEP, NF1),	/* UART0_RXD */
+ 	PAD_CFG_NF(GPP_C9, NONE, DEEP, NF1),	/* UART0_TXD */
++	PAD_CFG_NF(GPP_B14, DN_20K, PLTRST, NF1),	/* SPKR, for beep codes before ramstage */
+ };
+ 
+ // #endif
+diff --git a/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/hda_verb.c b/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/hda_verb.c
+index 621e4f7a52..1624e7b2fc 100644
+--- a/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/hda_verb.c
++++ b/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/hda_verb.c
+@@ -6,7 +6,10 @@ const u32 cim_verb_data[] = {
+ 	/* coreboot specific header, codec 0 */
+ 	0x10ec0255, /* Realtek ALC3234 */
+ 	0x102807a3, /* Subsystem ID */
+-	11,	    /* Number of entries */
++	12,	    /* Number of entries */
++
++	/* An OS driver's settings survive a warm reset */
++	AZALIA_RESET(1),
+ 
+ 	/* Pin Widget Verb Table */
+ 
+diff --git a/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/romstage.c b/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/romstage.c
+index 501b254232..5fe3f9d733 100644
+--- a/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/romstage.c
++++ b/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/romstage.c
+@@ -1,12 +1,18 @@
+ /* SPDX-License-Identifier: GPL-2.0-only */
+ 
+ #include <soc/romstage.h>
++#include <console/console.h>
+ #include <spd_bin.h>
++#include "../../diag.h"
+ 
+ void mainboard_memory_init_params(FSPM_UPD *mupd)
+ {
+ 	struct spd_block blk = { .addr_map = { 0x50, 0x52, } };
+ 	get_spd_smbus(&blk);
++	if (!blk.spd_array[0] && !blk.spd_array[1]) {
++		diag_set(DIAG_NO_MEMORY);
++		die("No memory modules found\n");
++	}
+ 	dump_spd_info(&blk);
+ 
+ 	FSP_M_CONFIG *mem_cfg = &mupd->FspmConfig;

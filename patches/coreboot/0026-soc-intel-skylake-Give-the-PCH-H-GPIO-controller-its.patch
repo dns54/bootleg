@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 19:00:00 +0200
+Subject: [PATCH 26/29] soc/intel/skylake: Give the PCH-H GPIO controller its
+ own ACPI ID
+
+The GPIO device always has _HID INT344B, Intel's ID for the PCH-LP
+controller. On PCH-H the communities hold other pads and the pad
+config lock registers sit at 0x90 instead of 0xa0, so the OS drives
+them with the wrong layout. Linux, for example, binds its Sunrise
+Point LP data to a B250 and reads every pad's lock state from the
+wrong register.
+
+Use the IDs Intel's reference code and OEM firmware use: INT3451 on
+100-series PCH-H and INT345D on 200-series PCH-H, told apart by the
+LPC/eSPI device ID (0xa1xx and 0xa2xx). The three memory resources
+already follow the PCH-H community order Linux expects (0xaf, 0xae,
+0xac).
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/soc/intel/skylake/acpi/gpio.asl | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/src/soc/intel/skylake/acpi/gpio.asl b/src/soc/intel/skylake/acpi/gpio.asl
+index 1d22b78f66..cdbde05996 100644
+--- a/src/soc/intel/skylake/acpi/gpio.asl
++++ b/src/soc/intel/skylake/acpi/gpio.asl
+@@ -4,7 +4,25 @@
+ 
+ Device (GPIO)
+ {
++#if CONFIG(SKYLAKE_SOC_PCH_H)
++	/* The LPC/eSPI device ID: 0xa1xx on 100-series PCHs, 0xa2xx on 200-series */
++	OperationRegion (LPCI, SystemMemory, CONFIG_ECAM_MMCONF_BASE_ADDRESS + 0xf8000, 4)
++	Field (LPCI, WordAcc, NoLock, Preserve)
++	{
++		Offset (2),
++		LDID, 16,
++	}
++
++	Method (_HID)
++	{
++		If ((LDID >> 8) == 0xa2) {
++			Return ("INT345D")
++		}
++		Return ("INT3451")
++	}
++#else
+ 	Name (_HID, "INT344B")
++#endif
+ 	Name (_UID, 1)
+ 	Name (_DDN, "GPIO Controller")
+ 

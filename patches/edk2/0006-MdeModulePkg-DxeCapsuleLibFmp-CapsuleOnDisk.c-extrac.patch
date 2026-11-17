@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sergii Dmytruk <sergii.dmytruk@3mdeb.com>
+Date: Tue, 6 Jan 2026 00:41:53 +0200
+Subject: [PATCH 06/25] MdeModulePkg/DxeCapsuleLibFmp/CapsuleOnDisk.c: extract
+ functions for freeing file info
+
+For deduplication and to make adding future code that needs to do the
+same easier.
+
+Signed-off-by: Sergii Dmytruk <sergii.dmytruk@3mdeb.com>
+Link: https://github.com/Dasharo/edk2/commit/aca5c960dbd8c5391ba2fdba285757ea610ea3ea
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../Library/DxeCapsuleLibFmp/CapsuleOnDisk.c  | 62 +++++++++++--------
+ 1 file changed, 37 insertions(+), 25 deletions(-)
+
+diff --git a/MdeModulePkg/Library/DxeCapsuleLibFmp/CapsuleOnDisk.c b/MdeModulePkg/Library/DxeCapsuleLibFmp/CapsuleOnDisk.c
+index 6620acb7cc..a1e05c0710 100644
+--- a/MdeModulePkg/Library/DxeCapsuleLibFmp/CapsuleOnDisk.c
++++ b/MdeModulePkg/Library/DxeCapsuleLibFmp/CapsuleOnDisk.c
+@@ -638,6 +638,40 @@ GetEfiSysPartitionFromActiveBootOption (
+   return Status;
+ }
+ 
++STATIC
++VOID
++FreeFileInfoEntry (
++  IN FILE_INFO_ENTRY  *Entry,
++  IN BOOLEAN          FreeInfo
++  )
++{
++  if (FreeInfo) {
++    FreePool (Entry->FileInfo);
++  }
++  FreePool (Entry->FileNameFirstPart);
++  FreePool (Entry->FileNameSecondPart);
++  FreePool (Entry);
++}
++
++STATIC
++VOID
++FreeFileInfoEntries (
++  IN LIST_ENTRY  *List,
++  IN BOOLEAN     FreeInfo
++  )
++{
++  FILE_INFO_ENTRY  *FileInfoEntry;
++  LIST_ENTRY       *Link;
++
++  while (!IsListEmpty (List)) {
++    Link = List->ForwardLink;
++    RemoveEntryList (Link);
++
++    FileInfoEntry = CR (Link, FILE_INFO_ENTRY, Link, FILE_INFO_SIGNATURE);
++    FreeFileInfoEntry (FileInfoEntry, FreeInfo);
++  }
++}
++
+ /**
+   This routine is called to get all file infos with in a given dir & with given file attribute, the file info is listed in
+   alphabetical order described in UEFI spec.
+@@ -861,17 +895,7 @@ EXIT:
+   }
+ 
+   if (EFI_ERROR (Status)) {
+-    while (!IsListEmpty (FileInfoList)) {
+-      Link = FileInfoList->ForwardLink;
+-      RemoveEntryList (Link);
+-
+-      TempFileInfoEntry = CR (Link, FILE_INFO_ENTRY, Link, FILE_INFO_SIGNATURE);
+-
+-      FreePool (TempFileInfoEntry->FileInfo);
+-      FreePool (TempFileInfoEntry->FileNameFirstPart);
+-      FreePool (TempFileInfoEntry->FileNameSecondPart);
+-      FreePool (TempFileInfoEntry);
+-    }
++    FreeFileInfoEntries (FileInfoList, /*FreeInfo=*/TRUE);
+ 
+     *FileNum = 0;
+   }
+@@ -989,10 +1013,7 @@ GetFileImageInAlphabetFromDir (
+       Link = RemoveEntryList (Link);
+       Link = Link->BackLink;
+ 
+-      FreePool (FileInfoEntry->FileInfo);
+-      FreePool (FileInfoEntry->FileNameFirstPart);
+-      FreePool (FileInfoEntry->FileNameSecondPart);
+-      FreePool (FileInfoEntry);
++      FreeFileInfoEntry (FileInfoEntry, /*FreeInfo=*/TRUE);
+ 
+       FreePool (TempFilePtrBuf[FileCount].ImageAddress);
+       TempFilePtrBuf[FileCount].ImageAddress = NULL;
+@@ -1022,16 +1043,7 @@ EXIT:
+   //
+   // FileInfo will be freed by the caller
+   //
+-  while (!IsListEmpty (&FileInfoList)) {
+-    Link = FileInfoList.ForwardLink;
+-    RemoveEntryList (Link);
+-
+-    FileInfoEntry = CR (Link, FILE_INFO_ENTRY, Link, FILE_INFO_SIGNATURE);
+-
+-    FreePool (FileInfoEntry->FileNameFirstPart);
+-    FreePool (FileInfoEntry->FileNameSecondPart);
+-    FreePool (FileInfoEntry);
+-  }
++  FreeFileInfoEntries (&FileInfoList, /*FreeInfo=*/FALSE);
+ 
+   return Status;
+ }

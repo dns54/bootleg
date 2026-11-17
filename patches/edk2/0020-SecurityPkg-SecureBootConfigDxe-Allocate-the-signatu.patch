@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:00:00 +0200
+Subject: [PATCH 20/25] SecurityPkg/SecureBootConfigDxe: Allocate the signature
+ owner GUID on first use
+
+Enrolling a KEK, db, dbx or dbt entry from a file needs
+Private->SignatureGUID, which the callbacks of the KEK, DB, DBX and DBT
+option forms allocated when the user opened them. "SecurityPkg/
+SecureBootConfigDxe: Overhaul Secure Boot setup UI" merged those forms
+into one page and dropped their question keys, so nothing allocates it
+any more:
+
+- every enrollment from a file fails with EFI_INVALID_PARAMETER, shown
+  as "ERROR: Unsupported file type!"
+- typing a Signature GUID runs StrToGuid () into a NULL pointer, guarded
+  only by an ASSERT, so release builds write the GUID to address 0
+
+Allocate the GUID at the start of the callback when it isn't there,
+the first time it is needed and again after an enrollment frees it.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../SecureBootConfigDxe/SecureBootConfigImpl.c       | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigImpl.c b/SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigImpl.c
+index 466ce40c72..34d4ea0191 100644
+--- a/SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigImpl.c
++++ b/SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigImpl.c
+@@ -4895,6 +4895,18 @@ SecureBootCallback (
+ 
+   gSecureBootPrivateData = Private;
+ 
++  //
++  // The KEK, DB, DBX and DBT option forms that allocated the signature owner GUID
++  // on entry are gone, and enrolling frees it. Allocate it on first use, before
++  // the GUID question or an enroll needs it.
++  //
++  if (Private->SignatureGUID == NULL) {
++    Private->SignatureGUID = (EFI_GUID *)AllocateZeroPool (sizeof (EFI_GUID));
++    if (Private->SignatureGUID == NULL) {
++      return EFI_OUT_OF_RESOURCES;
++    }
++  }
++
+   //
+   // Retrieve uncommitted data from Browser
+   //

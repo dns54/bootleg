@@ -1,0 +1,143 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 00:00:05 +0200
+Subject: [PATCH 18/25] UefiPayloadPkg: Don't draw the boot prompt's key
+ messages over setup
+
+The boot prompt's key handlers stay registered for the rest of the
+boot. The Esc one draws "Entering Setup, Please Wait..." the first
+time Esc is pressed, and the Enter one clears the prompt strip, black,
+on every Enter. In setup, every Enter painted a black bar at the bottom
+of the screen: it flashed when a form opened and stayed on a greyed-out
+item, where nothing redraws. When the firmware opens setup without an
+Esc, because the OS asked for it (OsIndications) or because nothing
+could be booted, the first Esc inside setup also drew its message over
+the setup screen.
+
+Let both handlers draw only while the prompt is on screen: until the
+first Esc or Enter, or until the firmware goes to setup without one.
+When the OS asked for setup, also skip the "Press ESC" prompt, since
+BDS opens setup right away.
+
+With Auto Boot Time-out set to 0, the handlers also drew over the boot
+loader: PlatformBootManagerWaitCallback (0) removes them, but BdsWait()
+only calls it with a non-zero time-out. MrChromebox's f371c04dfc skips
+the prompt in that case but leaves the handlers registered, so remove
+them there too.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../PlatformBootManager.c                     | 44 +++++++++++++++----
+ 1 file changed, 35 insertions(+), 9 deletions(-)
+
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+index 034cef0b8e..f746b8a0f0 100644
+--- a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+@@ -10,6 +10,7 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
+ #include "PlatformBootManager.h"
+ #include "PlatformConsole.h"
+ #include <Protocol/FirmwareVolume2.h>
++#include <Guid/GlobalVariable.h>
+ 
+ /**
+   Signal EndOfDxe event and install SMM Ready to lock protocol.
+@@ -303,6 +304,12 @@ PlatformUnregisterBootManagerEntryNotifyCallback (
+   }
+ }
+ 
++//
++// The boot prompt is on screen. The key handlers stay registered in setup, so they draw only
++// while this is set: until the first Esc or Enter, or until the firmware goes to setup.
++//
++STATIC BOOLEAN  mBootPrompt = TRUE;
++
+ EFI_STATUS
+ EFIAPI
+ BootManagerContinueNotifyCallback (
+@@ -313,7 +320,10 @@ BootManagerContinueNotifyCallback (
+   // The user chose to boot directly, so clear the boot prompt text just like
+   // when entering the Boot Manager Menu.
+   //
+-  BootLogoClearProgress ();
++  if (mBootPrompt) {
++    BootLogoClearProgress ();
++    mBootPrompt = FALSE;
++  }
+ 
+   return EFI_SUCCESS;
+ }
+@@ -327,16 +337,10 @@ BootManagerEntryNotifyCallback (
+   EFI_GRAPHICS_OUTPUT_BLT_PIXEL  Black;
+   EFI_GRAPHICS_OUTPUT_BLT_PIXEL  White;
+ 
+-  //
+-  // We can't call UnregisterKeyNotify () from this handler,
+-  // so work around it by only updating the progress message once
+-  //
+-  static UINTN UpdateProgressMessage = 1;
+-
+   Black.Blue = Black.Green = Black.Red = Black.Reserved = 0;
+   White.Blue = White.Green = White.Red = White.Reserved = 0xFF;
+ 
+-  if (UpdateProgressMessage) {
++  if (mBootPrompt) {
+     BootLogoUpdateProgress (
+       White,
+       Black,
+@@ -345,7 +349,7 @@ BootManagerEntryNotifyCallback (
+       0,
+       0
+       );
+-    UpdateProgressMessage = 0;
++    mBootPrompt = FALSE;
+   }
+ 
+   return EFI_SUCCESS;
+@@ -655,6 +659,8 @@ PlatformBootManagerAfterConsole (
+   EFI_GRAPHICS_OUTPUT_BLT_PIXEL  White;
+   EFI_STATUS                     Status;
+   BOOLEAN                        Alert;
++  UINT64                         *OsIndications;
++  BOOLEAN                        BootToSetup;
+ 
+   Black.Blue = Black.Green = Black.Red = Black.Reserved = 0;
+   White.Blue = White.Green = White.Red = White.Reserved = 0xFF;
+@@ -738,10 +744,28 @@ PlatformBootManagerAfterConsole (
+ 
+   Alert = BootAlertsShow ();
+ 
++  //
++  // The OS asked for setup, which BDS opens next: there is nothing to prompt for.
++  //
++  OsIndications = NULL;
++  GetEfiGlobalVariable2 (EFI_OS_INDICATIONS_VARIABLE_NAME, (VOID **)&OsIndications, NULL);
++  BootToSetup = (OsIndications != NULL) && ((*OsIndications & EFI_OS_INDICATIONS_BOOT_TO_FW_UI) != 0);
++  if (OsIndications != NULL) {
++    FreePool (OsIndications);
++  }
++
++  if (BootToSetup) {
++    mBootPrompt = FALSE;
++    return;
++  }
++
+   //
+   // No boot wait when timeout is zero, so skip setup/boot-menu hints.
++  // BDS then never calls PlatformBootManagerWaitCallback (0), which removes the key handlers,
++  // so remove them here, or Esc and Enter draw over the boot loader.
+   //
+   if (PcdGet16 (PcdPlatformBootTimeOut) == 0) {
++    PlatformUnregisterBootManagerEntryNotifyCallback ();
+     return;
+   }
+ 
+@@ -827,6 +851,8 @@ PlatformBootManagerUnableToBoot (
+     return;
+   }
+ 
++  mBootPrompt = FALSE;
++
+   for ( ; ;) {
+     EfiBootManagerBoot (&BootManagerMenu);
+   }

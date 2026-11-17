@@ -1,0 +1,230 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 04:58:42 +0200
+Subject: [PATCH 09/25] UefiPayloadPkg: Apply capsules on disk
+
+coreboot boots in flash update mode (LB_BOOT_MODE_FLASH_UPDATE in its
+boot mode table entry) when an OS has asked for capsules on disk to be
+applied, and only then lets SMM write the whole flash. UefiPayloadPkg
+didn't get from there to an applied update, nor back out of it:
+
+- Flash update mode: UefiPayloadEntry only switches to
+  BOOT_ON_FLASH_UPDATE when coreboot passes in-memory capsules, so
+  capsules on disk were never processed: PlatformBootManager skips
+  ProcessCapsules() outside flash update mode. Read the boot mode from
+  the coreboot table and switch to flash update mode for it too.
+  DxeCapsuleLibFmp then loads the capsules from the ESP. Based on
+  Dasharo's ParseIsDiskCapsulesBoot() (Sergii Dmytruk), which reads a
+  Dasharo-only coreboot field; upstream coreboot uses the boot mode
+  entry.
+
+- Leaving flash update mode: coreboot enters it whenever the
+  capsule-on-disk bit of OsIndications is set, and nothing in
+  UefiPayloadPkg clears it. After an update, or after a request that
+  found no capsule, every boot would enter flash update mode again and
+  end in the reset after the second capsule pass. Clear the request as
+  soon as the capsule files have been loaded (they are removed from the
+  ESP at that point), so the update needs no extra boot, and before the
+  reset of the second pass, so a request without capsules can't loop.
+  Dasharo clears it in its own PlatformBootManagerLib.
+
+- Reporting the update: EsrtDxe keeps the ESRT in a variable cache that
+  is synced from FMP only by ProcessCapsules(), which this payload runs
+  only in flash update mode. The sync happens before the post-update
+  reset, while the old firmware still runs, so after a successful
+  update the ESRT keeps reporting the old FwVersion until the next
+  capsule, and fwupd sees the update as failed. Use EsrtFmpDxe instead,
+  which builds the table from the FMP instances at ReadyToBoot on every
+  boot, including LastAttemptVersion/Status, which FmpDxe stores
+  itself. The firmware type is unchanged: both drivers report device
+  firmware unless PcdSystemFmpCapsuleImageTypeIdGuid is set.
+
+Link: https://github.com/Dasharo/edk2/commit/3603be5c90a63dac01a046ca0471fd10859baecb
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../DxeCapsuleLibFmp/DxeCapsuleProcessLib.c   |  9 +++++++++
+ UefiPayloadPkg/Include/Coreboot.h             | 11 ++++++++++
+ UefiPayloadPkg/Include/Library/BlParseLib.h   | 14 +++++++++++++
+ .../Library/CbParseLib/CbParseLib.c           | 20 +++++++++++++++++++
+ .../PlatformBootManager.c                     |  6 ++++++
+ .../Library/SblParseLib/SblParseLib.c         | 17 ++++++++++++++++
+ .../UefiPayloadEntry/UefiPayloadEntry.c       |  5 +++--
+ UefiPayloadPkg/UefiPayloadPkg.dsc             |  2 +-
+ UefiPayloadPkg/UefiPayloadPkg.fdf             |  2 +-
+ 9 files changed, 82 insertions(+), 4 deletions(-)
+
+diff --git a/MdeModulePkg/Library/DxeCapsuleLibFmp/DxeCapsuleProcessLib.c b/MdeModulePkg/Library/DxeCapsuleLibFmp/DxeCapsuleProcessLib.c
+index 53b1610ffe..a5081f14a2 100644
+--- a/MdeModulePkg/Library/DxeCapsuleLibFmp/DxeCapsuleProcessLib.c
++++ b/MdeModulePkg/Library/DxeCapsuleLibFmp/DxeCapsuleProcessLib.c
+@@ -290,6 +290,15 @@ InitCapsulePtr (
+     mCapsuleTotalNumber += CapsuleOnDiskNum;
+ 
+     DEBUG ((DEBUG_INFO, "%a(): loaded %d on-disk capsule(s)\n", __func__, CapsuleOnDiskNum));
++
++    //
++    // The files are in memory and gone from the ESP, so the request is done.
++    // Clear it now, or the bootloader enters flash update mode again after the
++    // reset that follows the update.
++    //
++    if (CapsuleOnDiskNum != 0) {
++      CoDClearCapsuleOnDiskFlag ();
++    }
+   }
+ 
+   DEBUG ((DEBUG_INFO, "mCapsuleTotalNumber - 0x%x\n", mCapsuleTotalNumber));
+diff --git a/UefiPayloadPkg/Include/Coreboot.h b/UefiPayloadPkg/Include/Coreboot.h
+index 2c2320d0ce..56ce1fe98a 100644
+--- a/UefiPayloadPkg/Include/Coreboot.h
++++ b/UefiPayloadPkg/Include/Coreboot.h
+@@ -369,4 +369,15 @@ struct cb_tpm_physical_presence {
+ 	UINT8 ppi_version;	/* BCD encoded */
+ } __attribute__((packed));
+ 
++#define CB_TAG_BOOT_MODE  0x00cd
++
++/* coreboot's enum boot_mode_t: flash protections are off for an update. */
++#define CB_BOOT_MODE_FLASH_UPDATE  6
++
++struct cb_boot_mode {
++  UINT32    tag;
++  UINT32    size;
++  UINT32    boot_mode;
++};
++
+ #endif // _COREBOOT_PEI_H_INCLUDED_
+diff --git a/UefiPayloadPkg/Include/Library/BlParseLib.h b/UefiPayloadPkg/Include/Library/BlParseLib.h
+index d7954c5ece..1e7e59a762 100644
+--- a/UefiPayloadPkg/Include/Library/BlParseLib.h
++++ b/UefiPayloadPkg/Include/Library/BlParseLib.h
+@@ -232,3 +232,17 @@ ParseTpm2EventLog (
+   OUT VOID    **Log,
+   OUT UINT32  *Size
+   );
++
++/**
++  Check whether the bootloader booted in flash update mode, for example
++  because an OS asked for capsules on disk to be applied.
++
++  @retval TRUE   The bootloader left flash protections off for an update.
++  @retval FALSE  Normal boot, or the bootloader doesn't report a boot mode.
++
++**/
++BOOLEAN
++EFIAPI
++ParseIsFlashUpdateBoot (
++  VOID
++  );
+diff --git a/UefiPayloadPkg/Library/CbParseLib/CbParseLib.c b/UefiPayloadPkg/Library/CbParseLib/CbParseLib.c
+index 9df0a3deae..1d8fca6fb9 100644
+--- a/UefiPayloadPkg/Library/CbParseLib/CbParseLib.c
++++ b/UefiPayloadPkg/Library/CbParseLib/CbParseLib.c
+@@ -1137,3 +1137,23 @@ ParseTpm2EventLog (
+   // CBMEM_ID_TPM2_TCG_LOG
+   return ParseCbMemTable (SIGNATURE_32 ('2', 'M', 'P', 'T'), Log, Size);
+ }
++
++/**
++  Check whether the bootloader booted in flash update mode, for example
++  because an OS asked for capsules on disk to be applied.
++
++  @retval TRUE   The bootloader left flash protections off for an update.
++  @retval FALSE  Normal boot, or the bootloader doesn't report a boot mode.
++
++**/
++BOOLEAN
++EFIAPI
++ParseIsFlashUpdateBoot (
++  VOID
++  )
++{
++  struct cb_boot_mode  *Mode;
++
++  Mode = FindCbTag (CB_TAG_BOOT_MODE);
++  return (Mode != NULL) && (Mode->boot_mode == CB_BOOT_MODE_FLASH_UPDATE);
++}
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+index 3321193242..cdfd97bd3a 100644
+--- a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+@@ -556,6 +556,12 @@ PlatformBootManagerAfterConsole (
+       DEBUG ((DEBUG_ERROR, "%a(): ProcessCapsule() failed with: %r\n", __func__, Status));
+     }
+ 
++    //
++    // An on-disk capsule request that found no capsule (no ESP, no files) is
++    // still set. Clear it, or every boot comes back here and resets.
++    //
++    CoDClearCapsuleOnDiskFlag ();
++
+     //
+     // Reset the system to disable SMI handler in order to exclude the
+     // possibility of it being used outside of the firmware.
+diff --git a/UefiPayloadPkg/Library/SblParseLib/SblParseLib.c b/UefiPayloadPkg/Library/SblParseLib/SblParseLib.c
+index c901a75568..93e2dba9af 100644
+--- a/UefiPayloadPkg/Library/SblParseLib/SblParseLib.c
++++ b/UefiPayloadPkg/Library/SblParseLib/SblParseLib.c
+@@ -399,3 +399,20 @@ ParseTpm2EventLog (
+ {
+   return RETURN_NOT_FOUND;
+ }
++
++/**
++  Check whether the bootloader booted in flash update mode, for example
++  because an OS asked for capsules on disk to be applied.
++
++  @retval TRUE   The bootloader left flash protections off for an update.
++  @retval FALSE  Normal boot, or the bootloader doesn't report a boot mode.
++
++**/
++BOOLEAN
++EFIAPI
++ParseIsFlashUpdateBoot (
++  VOID
++  )
++{
++  return FALSE;
++}
+diff --git a/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.c b/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.c
+index 4cdab037c1..d70ff30d98 100644
+--- a/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.c
++++ b/UefiPayloadPkg/UefiPayloadEntry/UefiPayloadEntry.c
+@@ -731,9 +731,10 @@ _ModuleEntryPoint (
+   DEBUG ((DEBUG_INFO, "DxeCoreEntryPoint = 0x%lx\n", DxeCoreEntryPoint));
+ 
+   //
+-  // Switch to update mode if there is at least one capsule.
++  // Switch to update mode if there is at least one capsule, or if the
++  // bootloader booted for capsules on disk, which DXE loads from the ESP.
+   //
+-  if (GetFirstHob (EFI_HOB_TYPE_UEFI_CAPSULE) != NULL) {
++  if ((GetFirstHob (EFI_HOB_TYPE_UEFI_CAPSULE) != NULL) || ParseIsFlashUpdateBoot ()) {
+     HobInfo->BootMode = BOOT_ON_FLASH_UPDATE;
+   }
+ 
+diff --git a/UefiPayloadPkg/UefiPayloadPkg.dsc b/UefiPayloadPkg/UefiPayloadPkg.dsc
+index 62d885bdb1..0b1f70cfff 100644
+--- a/UefiPayloadPkg/UefiPayloadPkg.dsc
++++ b/UefiPayloadPkg/UefiPayloadPkg.dsc
+@@ -1262,7 +1262,7 @@
+       FmpDeviceLib|FmpDevicePkg/Library/FmpDeviceLibNull/FmpDeviceLibNull.inf
+ !endif
+   }
+-  MdeModulePkg/Universal/EsrtDxe/EsrtDxe.inf
++  MdeModulePkg/Universal/EsrtFmpDxe/EsrtFmpDxe.inf
+ !endif
+ 
+ 
+diff --git a/UefiPayloadPkg/UefiPayloadPkg.fdf b/UefiPayloadPkg/UefiPayloadPkg.fdf
+index 9c6ad64fdb..b9653a8162 100644
+--- a/UefiPayloadPkg/UefiPayloadPkg.fdf
++++ b/UefiPayloadPkg/UefiPayloadPkg.fdf
+@@ -533,7 +533,7 @@ INF ShellPkg/Application/Shell/Shell.inf
+ !if $(CAPSULE_EMBED_FMP_DXE) == FALSE
+ INF  FILE_GUID = $(CAPSULE_MAIN_FW_GUID) FmpDevicePkg/FmpDxe/FmpDxe.inf
+ !endif
+-INF MdeModulePkg/Universal/EsrtDxe/EsrtDxe.inf
++INF MdeModulePkg/Universal/EsrtFmpDxe/EsrtFmpDxe.inf
+ !endif
+ 
+ !if $(UNIVERSAL_PAYLOAD) == TRUE

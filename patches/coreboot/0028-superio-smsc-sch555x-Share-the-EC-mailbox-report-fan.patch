@@ -1,0 +1,726 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 22:00:00 +0200
+Subject: [PATCH 28/29] superio/smsc/sch555x: Share the EC mailbox, report fans
+
+The OptiPlex 9020 and the sklkbl desktops carry identical copies of the
+SCH5555 EC mailbox code. Move it into the Super I/O driver as
+sch555x_mbox_read() and sch555x_mbox_write().
+
+Add what's needed to watch the fans of the EC's hardware monitor, whose
+registers follow the SCH5627 (Linux sch5627: count = 5400540 / RPM,
+0xffff when stopped):
+
+- sch555x_fan_failure(): whether a monitored fan is stopped or below
+  its minimum speed, giving a fan one second to spin up. The firmware
+  programs the minimum of each fan it wants monitored; the others keep
+  the reset value 0xffff, so no board needs to list its fans.
+- acpi/fan.asl: an ACPI fan device (PNP0C0B) for each monitored fan, so
+  the OS can read the speed through _FST. The EC keeps controlling the
+  fans, so each has one performance state the OS can't change. The full
+  ACPI 4.0 set (_FIF, _FPS, _FSL, _FST) is there because Linux before
+  6.15 only reports the speed with all four.
+
+Include it in both boards' DSDTs. The EC mailbox isn't used from SMM, so
+the AML method owns it while the OS runs.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/mainboard/dell/optiplex_9020/Makefile.mk  |   3 +-
+ src/mainboard/dell/optiplex_9020/bootblock.c  |   7 +-
+ src/mainboard/dell/optiplex_9020/dsdt.asl     |   2 +
+ src/mainboard/dell/optiplex_9020/mainboard.c  |  36 +++---
+ src/mainboard/dell/optiplex_9020/sch5555_ec.c |  54 ---------
+ src/mainboard/dell/optiplex_9020/sch5555_ec.h |  10 --
+ .../dell/sklkbl_desktops/Makefile.mk          |   2 -
+ .../dell/sklkbl_desktops/bootblock.c          |  21 ++--
+ src/mainboard/dell/sklkbl_desktops/dsdt.asl   |   2 +
+ src/mainboard/dell/sklkbl_desktops/ramstage.c |  18 +--
+ .../dell/sklkbl_desktops/sch5555_ec.c         |  54 ---------
+ .../dell/sklkbl_desktops/sch5555_ec.h         |  10 --
+ src/superio/smsc/sch555x/Makefile.mk          |   4 +-
+ src/superio/smsc/sch555x/acpi/fan.asl         | 104 ++++++++++++++++++
+ src/superio/smsc/sch555x/ec.c                 |  93 ++++++++++++++++
+ src/superio/smsc/sch555x/sch555x.h            |  14 +++
+ 16 files changed, 258 insertions(+), 176 deletions(-)
+ delete mode 100644 src/mainboard/dell/optiplex_9020/sch5555_ec.c
+ delete mode 100644 src/mainboard/dell/optiplex_9020/sch5555_ec.h
+ delete mode 100644 src/mainboard/dell/sklkbl_desktops/sch5555_ec.c
+ delete mode 100644 src/mainboard/dell/sklkbl_desktops/sch5555_ec.h
+ create mode 100644 src/superio/smsc/sch555x/acpi/fan.asl
+ create mode 100644 src/superio/smsc/sch555x/ec.c
+
+diff --git a/src/mainboard/dell/optiplex_9020/Makefile.mk b/src/mainboard/dell/optiplex_9020/Makefile.mk
+index 08e2e53577..6ca2f2afaa 100644
+--- a/src/mainboard/dell/optiplex_9020/Makefile.mk
++++ b/src/mainboard/dell/optiplex_9020/Makefile.mk
+@@ -2,5 +2,4 @@
+ 
+ romstage-y += gpio.c
+ ramstage-$(CONFIG_MAINBOARD_USE_LIBGFXINIT) += gma-mainboard.ads
+-ramstage-y += sch5555_ec.c
+-bootblock-y += bootblock.c sch5555_ec.c
++bootblock-y += bootblock.c
+diff --git a/src/mainboard/dell/optiplex_9020/bootblock.c b/src/mainboard/dell/optiplex_9020/bootblock.c
+index 00559105a7..68cd860842 100644
+--- a/src/mainboard/dell/optiplex_9020/bootblock.c
++++ b/src/mainboard/dell/optiplex_9020/bootblock.c
+@@ -4,7 +4,6 @@
+ #include <device/pnp_ops.h>
+ #include <superio/smsc/sch555x/sch555x.h>
+ #include <southbridge/intel/lynxpoint/pch.h>
+-#include "sch5555_ec.h"
+ 
+ struct ec_init_entry {
+ 	uint16_t addr;
+@@ -27,7 +26,7 @@ static void bootblock_ec_init(void)
+ 	};
+ 
+ 	for (size_t i = 0; i < ARRAY_SIZE(init_table1); ++i)
+-		sch5555_mbox_write(2, init_table1[i].addr, init_table1[i].val);
++		sch555x_mbox_write(2, init_table1[i].addr, init_table1[i].val);
+ 
+ 	static const struct ec_init_entry init_table2[] = {
+ 		{0x0005, 0x33}, {0x0018, 0x2f}, {0x0019, 0x2f}, {0x001a, 0x2f},
+@@ -45,7 +44,7 @@ static void bootblock_ec_init(void)
+ 	};
+ 
+ 	for (size_t i = 0; i < ARRAY_SIZE(init_table2); ++i)
+-		sch5555_mbox_write(1, init_table2[i].addr, init_table2[i].val);
++		sch555x_mbox_write(1, init_table2[i].addr, init_table2[i].val);
+ 
+ 	/*
+ 	 * Table from PeiHwmInit
+@@ -74,7 +73,7 @@ static void bootblock_ec_init(void)
+ 	};
+ 
+ 	for (size_t i = 0; i < ARRAY_SIZE(hwm_init_table); ++i)
+-		sch5555_mbox_write(1, hwm_init_table[i].addr, hwm_init_table[i].val);
++		sch555x_mbox_write(1, hwm_init_table[i].addr, hwm_init_table[i].val);
+ }
+ 
+ #define SCH555x_IOBASE	0x2e
+diff --git a/src/mainboard/dell/optiplex_9020/dsdt.asl b/src/mainboard/dell/optiplex_9020/dsdt.asl
+index 7ec1e9775a..208a6c7502 100644
+--- a/src/mainboard/dell/optiplex_9020/dsdt.asl
++++ b/src/mainboard/dell/optiplex_9020/dsdt.asl
+@@ -22,4 +22,6 @@ DefinitionBlock(
+ 		#include <northbridge/intel/haswell/acpi/hostbridge.asl>
+ 		#include <southbridge/intel/lynxpoint/acpi/pch.asl>
+ 	}
++
++	#include <superio/smsc/sch555x/acpi/fan.asl>
+ }
+diff --git a/src/mainboard/dell/optiplex_9020/mainboard.c b/src/mainboard/dell/optiplex_9020/mainboard.c
+index f4451aafd9..6c94a5ddbd 100644
+--- a/src/mainboard/dell/optiplex_9020/mainboard.c
++++ b/src/mainboard/dell/optiplex_9020/mainboard.c
+@@ -6,7 +6,7 @@
+ #include <drivers/intel/gma/int15.h>
+ #include <gpio.h>
+ #include <option.h>
+-#include "sch5555_ec.h"
++#include <superio/smsc/sch555x/sch555x.h>
+ 
+ static void mainboard_enable(struct device *dev)
+ {
+@@ -332,7 +332,7 @@ static void apply_hwm_tab(struct hwm_tab_entry *arr, size_t size)
+ 			val += temp_target;
+ 
+ 		// Perform write
+-		sch5555_mbox_write(1, arr[i].addr, val);
++		sch555x_mbox_write(1, arr[i].addr, val);
+ 
+ 	}
+ }
+@@ -343,9 +343,9 @@ static void sch5555_ec_hwm_init(void *arg)
+ 
+ 	printk(BIOS_DEBUG, "OptiPlex 9020 late HWM init\n");
+ 
+-	saved_2fc = sch5555_mbox_read(1, 0x2fc);
+-	sch5555_mbox_write(1, 0x2fc, 0xa0);
+-	sch5555_mbox_write(1, 0x2fd, 0x32);
++	saved_2fc = sch555x_mbox_read(1, 0x2fc);
++	sch555x_mbox_write(1, 0x2fc, 0xa0);
++	sch555x_mbox_write(1, 0x2fd, 0x32);
+ 
+ 	chassis_type = get_chassis_type();
+ 
+@@ -373,27 +373,27 @@ static void sch5555_ec_hwm_init(void *arg)
+ 
+ 	// NOTE: vendor firmware applies these when "max core address" > 2
+ 	// i think this is always the case
+-	sch5555_mbox_write(1, 0x9e, 0x30);
+-	sch5555_mbox_write(1, 0xeb, sch5555_mbox_read(1, 0xea));
++	sch555x_mbox_write(1, 0x9e, 0x30);
++	sch555x_mbox_write(1, 0xeb, sch555x_mbox_read(1, 0xea));
+ 
+-	sch5555_mbox_write(1, 0x2fc, saved_2fc);
++	sch555x_mbox_write(1, 0x2fc, saved_2fc);
+ 
+ 	// Apply full speed fan config if requested or if the chassis type is unknown
+ 	if (chassis_type == CHASSIS_TYPE_UNKNOWN || get_uint_option("fan_full_speed", 0)) {
+ 		printk(BIOS_DEBUG, "Setting full fan speed\n");
+-		sch5555_mbox_write(1, 0x80, 0x60 | sch5555_mbox_read(1, 0x80));
+-		sch5555_mbox_write(1, 0x81, 0x60 | sch5555_mbox_read(1, 0x81));
++		sch555x_mbox_write(1, 0x80, 0x60 | sch555x_mbox_read(1, 0x80));
++		sch555x_mbox_write(1, 0x81, 0x60 | sch555x_mbox_read(1, 0x81));
+ 	}
+ 
+-	sch5555_mbox_read(1, 0xb8);
++	sch555x_mbox_read(1, 0xb8);
+ 
+-	if ((chassis_type == 4 || chassis_type == 5) && sch5555_mbox_read(1, 0x26) == 0) {
+-		sch5555_mbox_write(1, 0xa0, sch5555_mbox_read(1, 0xa0) & 0xfb);
+-		sch5555_mbox_write(1, 0xa1, sch5555_mbox_read(1, 0xa1) & 0xfb);
+-		sch5555_mbox_write(1, 0xa2, sch5555_mbox_read(1, 0xa2) & 0xfb);
+-		sch5555_mbox_write(1, 0x8a, 0x99);
+-		sch5555_mbox_write(1, 0x8b, 0x47);
+-		sch5555_mbox_write(1, 0x8c, 0x91);
++	if ((chassis_type == 4 || chassis_type == 5) && sch555x_mbox_read(1, 0x26) == 0) {
++		sch555x_mbox_write(1, 0xa0, sch555x_mbox_read(1, 0xa0) & 0xfb);
++		sch555x_mbox_write(1, 0xa1, sch555x_mbox_read(1, 0xa1) & 0xfb);
++		sch555x_mbox_write(1, 0xa2, sch555x_mbox_read(1, 0xa2) & 0xfb);
++		sch555x_mbox_write(1, 0x8a, 0x99);
++		sch555x_mbox_write(1, 0x8b, 0x47);
++		sch555x_mbox_write(1, 0x8c, 0x91);
+ 	}
+ }
+ 
+diff --git a/src/mainboard/dell/optiplex_9020/sch5555_ec.c b/src/mainboard/dell/optiplex_9020/sch5555_ec.c
+deleted file mode 100644
+index 1df5026531..0000000000
+--- a/src/mainboard/dell/optiplex_9020/sch5555_ec.c
++++ /dev/null
+@@ -1,54 +0,0 @@
+-/* SPDX-License-Identifier: GPL-2.0-only */
+-
+-#include <arch/io.h>
+-#include <device/pnp_ops.h>
+-#include <superio/smsc/sch555x/sch555x.h>
+-#include "sch5555_ec.h"
+-
+-uint8_t sch5555_mbox_read(uint8_t addr1, uint16_t addr2)
+-{
+-	// clear ec-to-host mailbox
+-	uint8_t tmp = inb(SCH555x_EMI_IOBASE + 1);
+-	outb(tmp, SCH555x_EMI_IOBASE + 1);
+-
+-	// send address
+-	outw(0 | 0x8001, SCH555x_EMI_IOBASE + 2);
+-	outw((addr1 * 2) | 0x100, SCH555x_EMI_IOBASE + 4);
+-
+-	outw(4 | 0x8002, SCH555x_EMI_IOBASE + 2);
+-	outl(addr2 << 16, SCH555x_EMI_IOBASE + 4);
+-
+-	// send message to ec
+-	outb(1, SCH555x_EMI_IOBASE);
+-
+-	// wait for ack
+-	for (size_t retry = 0; retry < 0xfff; ++retry)
+-		if (inb(SCH555x_EMI_IOBASE + 1) & 1)
+-			break;
+-
+-	// read result
+-	outw(4 | 0x8000, SCH555x_EMI_IOBASE + 2);
+-	return inb(SCH555x_EMI_IOBASE + 4);
+-}
+-
+-void sch5555_mbox_write(uint8_t addr1, uint16_t addr2, uint8_t val)
+-{
+-	// clear ec-to-host mailbox
+-	uint8_t tmp = inb(SCH555x_EMI_IOBASE + 1);
+-	outb(tmp, SCH555x_EMI_IOBASE + 1);
+-
+-	// send address and value
+-	outw(0 | 0x8001, SCH555x_EMI_IOBASE + 2);
+-	outw((addr1 * 2) | 0x101, SCH555x_EMI_IOBASE + 4);
+-
+-	outw(4 | 0x8002, SCH555x_EMI_IOBASE + 2);
+-	outl(val | (addr2 << 16), SCH555x_EMI_IOBASE + 4);
+-
+-	// send message to ec
+-	outb(1, SCH555x_EMI_IOBASE);
+-
+-	// wait for ack
+-	for (size_t retry = 0; retry < 0xfff; ++retry)
+-		if (inb(SCH555x_EMI_IOBASE + 1) & 1)
+-			break;
+-}
+diff --git a/src/mainboard/dell/optiplex_9020/sch5555_ec.h b/src/mainboard/dell/optiplex_9020/sch5555_ec.h
+deleted file mode 100644
+index 9d262d5787..0000000000
+--- a/src/mainboard/dell/optiplex_9020/sch5555_ec.h
++++ /dev/null
+@@ -1,10 +0,0 @@
+-/* SPDX-License-Identifier: GPL-2.0-only */
+-
+-#ifndef __SCH5555_EC_H__
+-#define __SCH5555_EC_H__
+-
+-uint8_t sch5555_mbox_read(uint8_t addr1, uint16_t addr2);
+-
+-void sch5555_mbox_write(uint8_t addr1, uint16_t addr2, uint8_t val);
+-
+-#endif
+diff --git a/src/mainboard/dell/sklkbl_desktops/Makefile.mk b/src/mainboard/dell/sklkbl_desktops/Makefile.mk
+index 305aa2a93f..3ecd5da0e8 100644
+--- a/src/mainboard/dell/sklkbl_desktops/Makefile.mk
++++ b/src/mainboard/dell/sklkbl_desktops/Makefile.mk
+@@ -2,13 +2,11 @@
+ 
+ bootblock-y += bootblock.c
+ bootblock-y += variants/$(VARIANT_DIR)/early_gpio.c
+-bootblock-y += sch5555_ec.c
+ 
+ romstage-y += variants/$(VARIANT_DIR)/romstage.c
+ 
+ ramstage-y += ramstage.c
+ ramstage-y += variants/$(VARIANT_DIR)/gpio.c
+-ramstage-y += sch5555_ec.c
+ ramstage-y += variants/$(VARIANT_DIR)/hda_verb.c
+ ramstage-$(CONFIG_MAINBOARD_USE_LIBGFXINIT) += variants/$(VARIANT_DIR)/gma-mainboard.ads
+ 
+diff --git a/src/mainboard/dell/sklkbl_desktops/bootblock.c b/src/mainboard/dell/sklkbl_desktops/bootblock.c
+index fc583ea5a1..2bb3d61628 100644
+--- a/src/mainboard/dell/sklkbl_desktops/bootblock.c
++++ b/src/mainboard/dell/sklkbl_desktops/bootblock.c
+@@ -5,7 +5,6 @@
+ #include <soc/gpio.h>
+ #include <superio/smsc/sch555x/sch555x.h>
+ #include "../../../include/variant/gpio.h"
+-#include "sch5555_ec.h"
+ 
+ struct ec_init_entry {
+ 	uint16_t addr;
+@@ -28,7 +27,7 @@ static void bootblock_ec_init(void)
+ 	};
+ 
+ 	for (size_t i = 0; i < ARRAY_SIZE(init_table1); ++i)
+-		sch5555_mbox_write(2, init_table1[i].addr, init_table1[i].val);
++		sch555x_mbox_write(2, init_table1[i].addr, init_table1[i].val);
+ 
+ 	static const struct ec_init_entry init_table2[] = {
+ 		{0x0040, 0x00}, {0x00f8, 0x10}, {0x00f9, 0x00}, {0x00f0, 0x30},
+@@ -39,20 +38,20 @@ static void bootblock_ec_init(void)
+ 	};
+ 
+ 	for (size_t i = 0; i < ARRAY_SIZE(init_table2); ++i)
+-		sch5555_mbox_write(1, init_table2[i].addr, init_table2[i].val);
++		sch555x_mbox_write(1, init_table2[i].addr, init_table2[i].val);
+ 
+-	sch5555_mbox_write(1, 0x000b, 0x01);
+-	sch5555_mbox_write(4, 0x001a, 0x04);
+-	sch5555_mbox_write(4, 0x0028, 0x18);
+-	sch5555_mbox_write(4, 0x001a, 0x00);
+-	sch5555_mbox_write(1, 0x000b, 0x03);
++	sch555x_mbox_write(1, 0x000b, 0x01);
++	sch555x_mbox_write(4, 0x001a, 0x04);
++	sch555x_mbox_write(4, 0x0028, 0x18);
++	sch555x_mbox_write(4, 0x001a, 0x00);
++	sch555x_mbox_write(1, 0x000b, 0x03);
+ 
+ 	/*
+ 	 * Early HWM init
+ 	 */
+ 
+-	sch5555_mbox_read(1, 0xcb);
+-	sch5555_mbox_read(1, 0xb8);
++	sch555x_mbox_read(1, 0xcb);
++	sch555x_mbox_read(1, 0xb8);
+ 
+ 	static const struct ec_init_entry hwm_init_table[] = {
+ 		{0x02fc, 0xa0}, {0x02fd, 0x32}, {0x0005, 0x77}, {0x0019, 0x2f},
+@@ -78,7 +77,7 @@ static void bootblock_ec_init(void)
+ 	};
+ 
+ 	for (size_t i = 0; i < ARRAY_SIZE(hwm_init_table); ++i)
+-		sch5555_mbox_write(1, hwm_init_table[i].addr, hwm_init_table[i].val);
++		sch555x_mbox_write(1, hwm_init_table[i].addr, hwm_init_table[i].val);
+ }
+ 
+ 
+diff --git a/src/mainboard/dell/sklkbl_desktops/dsdt.asl b/src/mainboard/dell/sklkbl_desktops/dsdt.asl
+index 19f1483342..fabbc9515c 100644
+--- a/src/mainboard/dell/sklkbl_desktops/dsdt.asl
++++ b/src/mainboard/dell/sklkbl_desktops/dsdt.asl
+@@ -24,4 +24,6 @@ DefinitionBlock(
+ 	}
+ 
+ 	#include <southbridge/intel/common/acpi/sleepstates.asl>
++
++	#include <superio/smsc/sch555x/acpi/fan.asl>
+ }
+diff --git a/src/mainboard/dell/sklkbl_desktops/ramstage.c b/src/mainboard/dell/sklkbl_desktops/ramstage.c
+index b90e71394c..bad6e4589a 100644
+--- a/src/mainboard/dell/sklkbl_desktops/ramstage.c
++++ b/src/mainboard/dell/sklkbl_desktops/ramstage.c
+@@ -6,7 +6,7 @@
+ #include <soc/gpio.h>
+ #include <soc/ramstage.h>
+ #include "../../../include/variant/gpio.h"
+-#include "sch5555_ec.h"
++#include <superio/smsc/sch555x/sch555x.h>
+ 
+ void mainboard_silicon_init_params(FSP_SIL_UPD *params)
+ {
+@@ -462,7 +462,7 @@ static void apply_hwm_tab(const struct hwm_tab_entry *arr, size_t size)
+ 			val += temp_target;
+ 
+ 		// Perform write
+-		sch5555_mbox_write(1, arr[i].addr, val);
++		sch555x_mbox_write(1, arr[i].addr, val);
+ 	}
+ }
+ 
+@@ -475,9 +475,9 @@ static void sch5555_ec_hwm_init(void *arg)
+ 	form_fac_id = gpio_get(GPP_G2) | gpio_get(GPP_G3) << 1;
+ 	printk(BIOS_DEBUG, "Form Factor ID = %#x\n", form_fac_id);
+ 
+-	saved_2fc = sch5555_mbox_read(1, 0x2fc);
+-	sch5555_mbox_write(1, 0x2fc, 0xa0);
+-	sch5555_mbox_write(1, 0x2fd, 0x32);
++	saved_2fc = sch555x_mbox_read(1, 0x2fc);
++	sch555x_mbox_write(1, 0x2fc, 0xa0);
++	sch555x_mbox_write(1, 0x2fd, 0x32);
+ 
+ 	switch (form_fac_id) {
+ 	case FORM_FACTOR_MICRO:
+@@ -501,12 +501,12 @@ static void sch5555_ec_hwm_init(void *arg)
+ 	core_cnt = get_core_cnt();
+ 	printk(BIOS_DEBUG, "CPU Core Count = %#x\n", core_cnt);
+ 	if (core_cnt > 2) {
+-		sch5555_mbox_write(1, 0x9e, 0x30);
+-		sch5555_mbox_write(1, 0xeb, sch5555_mbox_read(1, 0xea));
++		sch555x_mbox_write(1, 0x9e, 0x30);
++		sch555x_mbox_write(1, 0xeb, sch555x_mbox_read(1, 0xea));
+ 	}
+ 
+-	sch5555_mbox_write(1, 0x2fc, saved_2fc);
+-	sch5555_mbox_read(1, 0xb8);
++	sch555x_mbox_write(1, 0x2fc, saved_2fc);
++	sch555x_mbox_read(1, 0xb8);
+ }
+ 
+ BOOT_STATE_INIT_ENTRY(BS_POST_DEVICE, BS_ON_EXIT, sch5555_ec_hwm_init, NULL);
+diff --git a/src/mainboard/dell/sklkbl_desktops/sch5555_ec.c b/src/mainboard/dell/sklkbl_desktops/sch5555_ec.c
+deleted file mode 100644
+index 1df5026531..0000000000
+--- a/src/mainboard/dell/sklkbl_desktops/sch5555_ec.c
++++ /dev/null
+@@ -1,54 +0,0 @@
+-/* SPDX-License-Identifier: GPL-2.0-only */
+-
+-#include <arch/io.h>
+-#include <device/pnp_ops.h>
+-#include <superio/smsc/sch555x/sch555x.h>
+-#include "sch5555_ec.h"
+-
+-uint8_t sch5555_mbox_read(uint8_t addr1, uint16_t addr2)
+-{
+-	// clear ec-to-host mailbox
+-	uint8_t tmp = inb(SCH555x_EMI_IOBASE + 1);
+-	outb(tmp, SCH555x_EMI_IOBASE + 1);
+-
+-	// send address
+-	outw(0 | 0x8001, SCH555x_EMI_IOBASE + 2);
+-	outw((addr1 * 2) | 0x100, SCH555x_EMI_IOBASE + 4);
+-
+-	outw(4 | 0x8002, SCH555x_EMI_IOBASE + 2);
+-	outl(addr2 << 16, SCH555x_EMI_IOBASE + 4);
+-
+-	// send message to ec
+-	outb(1, SCH555x_EMI_IOBASE);
+-
+-	// wait for ack
+-	for (size_t retry = 0; retry < 0xfff; ++retry)
+-		if (inb(SCH555x_EMI_IOBASE + 1) & 1)
+-			break;
+-
+-	// read result
+-	outw(4 | 0x8000, SCH555x_EMI_IOBASE + 2);
+-	return inb(SCH555x_EMI_IOBASE + 4);
+-}
+-
+-void sch5555_mbox_write(uint8_t addr1, uint16_t addr2, uint8_t val)
+-{
+-	// clear ec-to-host mailbox
+-	uint8_t tmp = inb(SCH555x_EMI_IOBASE + 1);
+-	outb(tmp, SCH555x_EMI_IOBASE + 1);
+-
+-	// send address and value
+-	outw(0 | 0x8001, SCH555x_EMI_IOBASE + 2);
+-	outw((addr1 * 2) | 0x101, SCH555x_EMI_IOBASE + 4);
+-
+-	outw(4 | 0x8002, SCH555x_EMI_IOBASE + 2);
+-	outl(val | (addr2 << 16), SCH555x_EMI_IOBASE + 4);
+-
+-	// send message to ec
+-	outb(1, SCH555x_EMI_IOBASE);
+-
+-	// wait for ack
+-	for (size_t retry = 0; retry < 0xfff; ++retry)
+-		if (inb(SCH555x_EMI_IOBASE + 1) & 1)
+-			break;
+-}
+diff --git a/src/mainboard/dell/sklkbl_desktops/sch5555_ec.h b/src/mainboard/dell/sklkbl_desktops/sch5555_ec.h
+deleted file mode 100644
+index 9d262d5787..0000000000
+--- a/src/mainboard/dell/sklkbl_desktops/sch5555_ec.h
++++ /dev/null
+@@ -1,10 +0,0 @@
+-/* SPDX-License-Identifier: GPL-2.0-only */
+-
+-#ifndef __SCH5555_EC_H__
+-#define __SCH5555_EC_H__
+-
+-uint8_t sch5555_mbox_read(uint8_t addr1, uint16_t addr2);
+-
+-void sch5555_mbox_write(uint8_t addr1, uint16_t addr2, uint8_t val);
+-
+-#endif
+diff --git a/src/superio/smsc/sch555x/Makefile.mk b/src/superio/smsc/sch555x/Makefile.mk
+index 047fb5cf43..ba67673476 100644
+--- a/src/superio/smsc/sch555x/Makefile.mk
++++ b/src/superio/smsc/sch555x/Makefile.mk
+@@ -1,4 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ 
+-bootblock-$(CONFIG_SUPERIO_SMSC_SCH555x) += emi.c bootblock.c
+-ramstage-$(CONFIG_SUPERIO_SMSC_SCH555x) += ramstage.c
++bootblock-$(CONFIG_SUPERIO_SMSC_SCH555x) += emi.c bootblock.c ec.c
++ramstage-$(CONFIG_SUPERIO_SMSC_SCH555x) += ramstage.c ec.c
+diff --git a/src/superio/smsc/sch555x/acpi/fan.asl b/src/superio/smsc/sch555x/acpi/fan.asl
+new file mode 100644
+index 0000000000..6799c5bc3b
+--- /dev/null
++++ b/src/superio/smsc/sch555x/acpi/fan.asl
+@@ -0,0 +1,104 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++/* ACPI fan devices for the fans the SCH555x watches. The EC controls them; the OS reads the speed. */
++
++Scope (\_SB)
++{
++	OperationRegion (SEMB, SystemIO, 0x0a00, 2)	/* SCH555x_EMI_IOBASE */
++	Field (SEMB, ByteAcc, NoLock, Preserve)
++	{
++		SH2E, 8,	/* Host-to-EC mailbox */
++		SE2H, 8,	/* EC-to-host mailbox */
++	}
++
++	OperationRegion (SEMA, SystemIO, 0x0a02, 2)
++	Field (SEMA, WordAcc, NoLock, Preserve)
++	{
++		SADR, 16,	/* EC address and access size */
++	}
++
++	OperationRegion (SEMD, SystemIO, 0x0a04, 4)
++	Field (SEMD, DWordAcc, NoLock, Preserve)
++	{
++		SDAT, 32,
++	}
++	Field (SEMD, WordAcc, NoLock, Preserve)
++	{
++		SDTW, 16,
++	}
++	Field (SEMD, ByteAcc, NoLock, Preserve)
++	{
++		SDTB, 8,
++	}
++
++	/* Read hardware monitor register Arg0 (mailbox bank 1), like sch555x_mbox_read() */
++	Method (SHWR, 1, Serialized)
++	{
++		Local0 = SE2H		/* clear the EC-to-host mailbox */
++		SE2H = Local0
++		SADR = 0x8001
++		SDTW = 0x0102
++		SADR = 0x8006
++		SDAT = Arg0 << 16
++		SH2E = 1
++		Local0 = 0
++		While (!(SE2H & 1) && (Local0 < 1000)) {
++			Stall (5)
++			Local0++
++		}
++		SADR = 0x8004
++		Return (SDTB)
++	}
++
++	/* 16-bit register Arg0: reading the LSB latches the MSB */
++	Method (SHW2, 1, Serialized)
++	{
++		Local0 = SHWR (Arg0)
++		Return (Local0 | (SHWR (Arg0 + 1) << 8))
++	}
++
++/*
++ * All four ACPI 4.0 fan objects: Linux before 6.15 shows the speed only with all of them.
++ * One fixed performance state, since the EC controls the fan. 0xffffffff: not available.
++ */
++#define SCH555x_FAN(N)								\
++	Device (FAN##N)								\
++	{									\
++		Name (_HID, EisaId ("PNP0C0B"))					\
++		Name (_UID, N)							\
++		/* Present when the firmware programmed its minimum speed. */	\
++		/* 0xffff is the reset value, 0 a fan the EC doesn't have. */	\
++		Method (_STA)							\
++		{								\
++			Local0 = SHW2 (0x62 + 2 * N)				\
++			If ((Local0 == 0xffff) || (Local0 == 0)) {		\
++				Return (0)					\
++			}							\
++			Return (0x0f)						\
++		}								\
++		Name (_FIF, Package () { 0, 0, 1, 0 })				\
++		Name (_FPS, Package () {					\
++			0,							\
++			Package () { 0, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff } \
++		})								\
++		Method (_FSL, 1)						\
++		{								\
++		}								\
++		Method (_FST)							\
++		{								\
++			Local0 = Package () { 0, 0, 0xffffffff }		\
++			Local1 = SHW2 (0x2c + 2 * N)				\
++			If (Local1 == 0xffff) {					\
++				Local0[2] = 0					\
++			} ElseIf (Local1 != 0) {				\
++				Local0[2] = 5400540 / Local1			\
++			}							\
++			Return (Local0)						\
++		}								\
++	}
++
++	SCH555x_FAN(0)
++	SCH555x_FAN(1)
++	SCH555x_FAN(2)
++	SCH555x_FAN(3)
++}
+diff --git a/src/superio/smsc/sch555x/ec.c b/src/superio/smsc/sch555x/ec.c
+new file mode 100644
+index 0000000000..fc5b48a517
+--- /dev/null
++++ b/src/superio/smsc/sch555x/ec.c
+@@ -0,0 +1,93 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <arch/io.h>
++#include <console/console.h>
++#include <delay.h>
++#include <device/pnp_ops.h>
++#include <types.h>
++#include "sch555x.h"
++
++uint8_t sch555x_mbox_read(uint8_t addr1, uint16_t addr2)
++{
++	// clear ec-to-host mailbox
++	uint8_t tmp = inb(SCH555x_EMI_IOBASE + 1);
++	outb(tmp, SCH555x_EMI_IOBASE + 1);
++
++	// send address
++	outw(0 | 0x8001, SCH555x_EMI_IOBASE + 2);
++	outw((addr1 * 2) | 0x100, SCH555x_EMI_IOBASE + 4);
++
++	outw(4 | 0x8002, SCH555x_EMI_IOBASE + 2);
++	outl(addr2 << 16, SCH555x_EMI_IOBASE + 4);
++
++	// send message to ec
++	outb(1, SCH555x_EMI_IOBASE);
++
++	// wait for ack
++	for (size_t retry = 0; retry < 0xfff; ++retry)
++		if (inb(SCH555x_EMI_IOBASE + 1) & 1)
++			break;
++
++	// read result
++	outw(4 | 0x8000, SCH555x_EMI_IOBASE + 2);
++	return inb(SCH555x_EMI_IOBASE + 4);
++}
++
++void sch555x_mbox_write(uint8_t addr1, uint16_t addr2, uint8_t val)
++{
++	// clear ec-to-host mailbox
++	uint8_t tmp = inb(SCH555x_EMI_IOBASE + 1);
++	outb(tmp, SCH555x_EMI_IOBASE + 1);
++
++	// send address and value
++	outw(0 | 0x8001, SCH555x_EMI_IOBASE + 2);
++	outw((addr1 * 2) | 0x101, SCH555x_EMI_IOBASE + 4);
++
++	outw(4 | 0x8002, SCH555x_EMI_IOBASE + 2);
++	outl(val | (addr2 << 16), SCH555x_EMI_IOBASE + 4);
++
++	// send message to ec
++	outb(1, SCH555x_EMI_IOBASE);
++
++	// wait for ack
++	for (size_t retry = 0; retry < 0xfff; ++retry)
++		if (inb(SCH555x_EMI_IOBASE + 1) & 1)
++			break;
++}
++
++static uint16_t hwm_read16(uint16_t reg)
++{
++	/* Reading the LSB latches the MSB */
++	const uint8_t lsb = sch555x_mbox_read(1, reg);
++	return lsb | sch555x_mbox_read(1, reg + 1) << 8;
++}
++
++bool sch555x_fan_failure(void)
++{
++	bool failure = false;
++
++	for (unsigned int i = 0; i < SCH555x_HWM_FANS; i++) {
++		/* Unmonitored: 0xffff is the reset value, 0 a fan the SCH5555 doesn't have */
++		const uint16_t min = hwm_read16(SCH555x_HWM_FAN_MIN(i));
++		if (min == 0xffff || min == 0)
++			continue;
++
++		/* The count is the time per revolution: higher is slower. Allow a second to spin up. */
++		uint16_t count = hwm_read16(SCH555x_HWM_FAN(i));
++		for (unsigned int ms = 0; count > min && ms < 1000; ms += 100) {
++			mdelay(100);
++			count = hwm_read16(SCH555x_HWM_FAN(i));
++		}
++
++		if (count > min) {
++			printk(BIOS_WARNING, "SCH555x: fan %u is stopped or below its minimum speed\n",
++			       i + 1);
++			failure = true;
++		} else if (count) {
++			printk(BIOS_INFO, "SCH555x: fan %u at %u RPM\n", i + 1,
++			       SCH555x_HWM_FAN_RPM / count);
++		}
++	}
++
++	return failure;
++}
+diff --git a/src/superio/smsc/sch555x/sch555x.h b/src/superio/smsc/sch555x/sch555x.h
+index 4af95eca1c..5298dac9f6 100644
+--- a/src/superio/smsc/sch555x/sch555x.h
++++ b/src/superio/smsc/sch555x/sch555x.h
+@@ -58,6 +58,20 @@ void sch555x_emi_write8(uint16_t addr, uint8_t val);
+ void sch555x_emi_write16(uint16_t addr, uint16_t val);
+ void sch555x_emi_write32(uint16_t addr, uint32_t val);
+ 
++uint8_t sch555x_mbox_read(uint8_t addr1, uint16_t addr2);
++void sch555x_mbox_write(uint8_t addr1, uint16_t addr2, uint8_t val);
++
++/*
++ * Hardware monitor fans (mailbox bank 1), 16-bit, LSB first. The count is the time per
++ * revolution, 0xffff when the fan is stopped.
++ */
++#define SCH555x_HWM_FANS		4
++#define SCH555x_HWM_FAN(i)		(0x2c + 2 * (i))
++#define SCH555x_HWM_FAN_MIN(i)		(0x62 + 2 * (i))
++#define SCH555x_HWM_FAN_RPM		5400540	/* divided by the count */
++
++bool sch555x_fan_failure(void);
++
+ /*
+  * Bootblock entry points
+  */

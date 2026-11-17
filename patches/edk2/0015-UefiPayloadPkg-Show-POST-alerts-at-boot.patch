@@ -1,0 +1,387 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:42:00 +0200
+Subject: [PATCH 15/25] UefiPayloadPkg: Show POST alerts at boot
+
+Show the problems found before boot as Dell-style alerts on the screen
+and the serial console, without stopping the boot:
+
+- the ones coreboot passes in the hidden boot_alerts setup value (CFR):
+  a chassis intrusion, a dead RTC battery, a thermal trip on the
+  previous boot, a stopped fan;
+- SATA disks over a SMART threshold, from the AHCI driver's status code;
+- NVMe disks with a critical warning in their SMART / Health log.
+
+With the board's "Beep Codes" option, beep twice for an alert, and with
+"Errors and POST" once when POST completes without one. The beeps come
+from the 8254, at Dasharo's pitches: 800 Hz for errors, 1500 Hz for
+POST; the board keeps the 8254 running. Boards without the option don't
+beep. Timer callbacks wait (TPL_NOTIFY) while the speaker is on:
+otherwise a busy one, such as USB enumeration right after the console
+connects, keeps it on past the delay and the beeps come out uneven.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../PlatformBootManagerLib/BootAlerts.c       | 243 ++++++++++++++++++
+ .../PlatformBootManager.c                     |  11 +-
+ .../PlatformBootManager.h                     |  19 ++
+ .../PlatformBootManagerLib.inf                |   5 +
+ 4 files changed, 276 insertions(+), 2 deletions(-)
+ create mode 100644 UefiPayloadPkg/Library/PlatformBootManagerLib/BootAlerts.c
+
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/BootAlerts.c b/UefiPayloadPkg/Library/PlatformBootManagerLib/BootAlerts.c
+new file mode 100644
+index 0000000000..b34196b978
+--- /dev/null
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/BootAlerts.c
+@@ -0,0 +1,243 @@
++/** @file
++  Show the problems found before boot as Dell-style alerts on the screen and the serial console,
++  without stopping the boot: the ones coreboot reports in the boot_alerts setup value, and disks
++  with a SMART failure.
++
++  SPDX-License-Identifier: BSD-2-Clause-Patent
++**/
++
++#include "PlatformBootManager.h"
++#include <IndustryStandard/Nvme.h>
++#include <Protocol/NvmExpressPassthru.h>
++#include <Protocol/ReportStatusCodeHandler.h>
++#include <Library/IoLib.h>
++#include <Library/TimerLib.h>
++
++// Same bits as coreboot's mainboard diag.h
++#define BOOT_ALERT_INTRUSION    BIT0
++#define BOOT_ALERT_RTC_BATTERY  BIT1
++#define BOOT_ALERT_THERMTRIP    BIT2
++#define BOOT_ALERT_FAN          BIT3
++
++// coreboot's beep_codes option values
++#define BEEP_CODES_ERRORS           1
++#define BEEP_CODES_ERRORS_AND_POST  2
++
++// The namespace ID for the whole controller
++#define NVME_ALL_NAMESPACES  0xFFFFFFFF
++
++STATIC EFI_RSC_HANDLER_PROTOCOL  *mRscHandler;
++STATIC BOOLEAN                   mSmartFailure;
++
++/**
++  Note a SATA disk's SMART threshold exceeded condition, which the AHCI driver reports as a
++  status code while it starts the disk.
++**/
++STATIC
++EFI_STATUS
++EFIAPI
++BootAlertsStatusCode (
++  IN EFI_STATUS_CODE_TYPE   CodeType,
++  IN EFI_STATUS_CODE_VALUE  Value,
++  IN UINT32                 Instance,
++  IN EFI_GUID               *CallerId,
++  IN EFI_STATUS_CODE_DATA   *Data
++  )
++{
++  if (Value == (EFI_IO_BUS_ATA_ATAPI | EFI_IOB_ATA_BUS_SMART_OVERTHRESHOLD)) {
++    mSmartFailure = TRUE;
++  }
++
++  return EFI_SUCCESS;
++}
++
++/**
++  Start watching for SATA SMART failures. Call before the disks are connected.
++**/
++VOID
++BootAlertsStart (
++  VOID
++  )
++{
++  if (!EFI_ERROR (gBS->LocateProtocol (&gEfiRscHandlerProtocolGuid, NULL, (VOID **)&mRscHandler))) {
++    mRscHandler->Register (BootAlertsStatusCode, TPL_HIGH_LEVEL);
++  } else {
++    mRscHandler = NULL;
++  }
++}
++
++/**
++  Return whether an NVMe controller reports a critical warning in its SMART / Health log.
++**/
++STATIC
++BOOLEAN
++NvmeCriticalWarning (
++  IN EFI_NVM_EXPRESS_PASS_THRU_PROTOCOL  *PassThru
++  )
++{
++  EFI_NVM_EXPRESS_PASS_THRU_COMMAND_PACKET  Packet;
++  EFI_NVM_EXPRESS_COMMAND                   Command;
++  EFI_NVM_EXPRESS_COMPLETION                Completion;
++  NVME_SMART_HEALTH_INFO_LOG                *Log;
++  BOOLEAN                                   Warning;
++
++  //
++  // A page, so the log buffer needs a single PRP entry.
++  //
++  Log = AllocatePages (1);
++  if (Log == NULL) {
++    return FALSE;
++  }
++
++  ZeroMem (Log, EFI_PAGE_SIZE);
++  ZeroMem (&Packet, sizeof (Packet));
++  ZeroMem (&Command, sizeof (Command));
++  ZeroMem (&Completion, sizeof (Completion));
++
++  Command.Cdw0.Opcode = NVME_ADMIN_GET_LOG_PAGE_CMD;
++  Command.Nsid        = NVME_ALL_NAMESPACES;
++  Command.Cdw10       = LID_SMART_INFO | ((sizeof (*Log) / sizeof (UINT32) - 1) << 16);
++  Command.Flags       = CDW10_VALID;
++
++  Packet.NvmeCmd        = &Command;
++  Packet.NvmeCompletion = &Completion;
++  Packet.TransferBuffer = Log;
++  Packet.TransferLength = sizeof (*Log);
++  Packet.CommandTimeout = EFI_TIMER_PERIOD_SECONDS (5);
++  Packet.QueueType      = NVME_ADMIN_QUEUE;
++
++  Warning = !EFI_ERROR (PassThru->PassThru (PassThru, NVME_ALL_NAMESPACES, &Packet, NULL)) &&
++            (*(UINT8 *)Log != 0);
++  if (Warning) {
++    DEBUG ((DEBUG_WARN, "NVMe critical warning 0x%x\n", *(UINT8 *)Log));
++  }
++
++  FreePages (Log, 1);
++  return Warning;
++}
++
++/**
++  Return whether any NVMe controller reports a critical warning.
++**/
++STATIC
++BOOLEAN
++NvmeSmartFailure (
++  VOID
++  )
++{
++  EFI_HANDLE                          *Handles;
++  UINTN                               Count;
++  UINTN                               Index;
++  EFI_NVM_EXPRESS_PASS_THRU_PROTOCOL  *PassThru;
++  BOOLEAN                             Failure;
++
++  Failure = FALSE;
++  if (EFI_ERROR (
++        gBS->LocateHandleBuffer (ByProtocol, &gEfiNvmExpressPassThruProtocolGuid, NULL, &Count, &Handles)
++        ))
++  {
++    return FALSE;
++  }
++
++  for (Index = 0; Index < Count; Index++) {
++    if (!EFI_ERROR (gBS->HandleProtocol (Handles[Index], &gEfiNvmExpressPassThruProtocolGuid, (VOID **)&PassThru)) &&
++        NvmeCriticalWarning (PassThru))
++    {
++      Failure = TRUE;
++    }
++  }
++
++  FreePool (Handles);
++  return Failure;
++}
++
++/**
++  A beep on the PC speaker, from the 8254's counter 2. The board keeps the 8254 running.
++  Call at TPL_NOTIFY: timer callbacks running during the delay would keep the speaker on
++  past it, or stretch the gaps between beeps.
++
++  @param[in]  Frequency   The pitch in Hz.
++  @param[in]  DurationMs  The length in milliseconds.
++**/
++STATIC
++VOID
++Beep (
++  IN UINT32  Frequency,
++  IN UINT32  DurationMs
++  )
++{
++  UINT16  Divisor;
++
++  Divisor = (UINT16)(1193182 / Frequency);
++  IoWrite8 (0x43, 0xB6);
++  IoWrite8 (0x42, (UINT8)Divisor);
++  IoWrite8 (0x42, (UINT8)(Divisor >> 8));
++  IoOr8 (0x61, BIT0 | BIT1);
++  MicroSecondDelay (DurationMs * 1000);
++  IoAnd8 (0x61, (UINT8) ~(BIT0 | BIT1));
++}
++
++/**
++  Show the alerts. Call after the disks are connected.
++
++  @retval TRUE   At least one alert was shown.
++  @retval FALSE  No alerts.
++**/
++BOOLEAN
++BootAlertsShow (
++  VOID
++  )
++{
++  UINT32   Alerts;
++  UINT32   BeepCodes;
++  BOOLEAN  Smart;
++  EFI_TPL  OldTpl;
++
++  if (mRscHandler != NULL) {
++    mRscHandler->Unregister (BootAlertsStatusCode);
++  }
++
++  Alerts = CfrOptionGetUint32 ("boot_alerts", 0);
++  Smart  = mSmartFailure || NvmeSmartFailure ();
++
++  if (Alerts & BOOT_ALERT_INTRUSION) {
++    Print (L"Alert! Cover was previously removed.\n");
++  }
++
++  if (Alerts & BOOT_ALERT_RTC_BATTERY) {
++    Print (L"Alert! System battery voltage is low.\n");
++  }
++
++  if (Alerts & BOOT_ALERT_THERMTRIP) {
++    Print (L"Alert! Previous shutdown due to thermal event.\n");
++  }
++
++  if (Alerts & BOOT_ALERT_FAN) {
++    Print (L"Alert! Fan failure.\n");
++  }
++
++  if (Smart) {
++    Print (
++      L"Alert! Hard Drive SELF MONITORING SYSTEM has reported that a parameter has exceeded its\n"
++      L"normal operating range. Back up your data regularly.\n"
++      );
++  }
++
++  BeepCodes = 0;
++  if (CfrOptionGetUint32 ("speaker", 1) != 0) {
++    BeepCodes = CfrOptionGetUint32 ("beep_codes", 0);
++  }
++
++  OldTpl = gBS->RaiseTPL (TPL_NOTIFY);
++  if (((Alerts != 0) || Smart) && (BeepCodes >= BEEP_CODES_ERRORS)) {
++    Beep (800, 300);
++    MicroSecondDelay (150 * 1000);
++    Beep (800, 300);
++  } else if (BeepCodes == BEEP_CODES_ERRORS_AND_POST) {
++    Beep (1500, 100);
++  }
++
++  gBS->RestoreTPL (OldTpl);
++
++  return (Alerts != 0) || Smart;
++}
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+index d57a649287..749c23dbee 100644
+--- a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+@@ -528,6 +528,8 @@ PlatformBootManagerBeforeConsole (
+   BOOLEAN                       ConsoleInitialized;
+   EFI_HANDLE                    Handle;
+ 
++  BootAlertsStart ();
++
+   Handle = NULL;
+   Status = gBS->InstallMultipleProtocolInterfaces (
+                   &Handle,
+@@ -652,6 +654,7 @@ PlatformBootManagerAfterConsole (
+   EFI_GRAPHICS_OUTPUT_BLT_PIXEL  Black;
+   EFI_GRAPHICS_OUTPUT_BLT_PIXEL  White;
+   EFI_STATUS                     Status;
++  BOOLEAN                        Alert;
+ 
+   Black.Blue = Black.Green = Black.Red = Black.Reserved = 0;
+   White.Blue = White.Green = White.Red = White.Reserved = 0xFF;
+@@ -733,6 +736,8 @@ PlatformBootManagerAfterConsole (
+       );
+   }
+ 
++  Alert = BootAlertsShow ();
++
+   //
+   // No boot wait when timeout is zero, so skip setup/boot-menu hints.
+   //
+@@ -752,7 +757,8 @@ PlatformBootManagerAfterConsole (
+       BootLogoUpdateProgress (
+         White,
+         Black,
+-        L"Press ESC for Boot Options/Settings",
++        Alert ? L"Alert! Press ESC for Boot Options/Settings" :
++                L"Press ESC for Boot Options/Settings",
+         White,
+         0,
+         0
+@@ -770,7 +776,8 @@ PlatformBootManagerAfterConsole (
+       BootLogoUpdateProgress (
+         White,
+         Black,
+-        L"Press F2 or Down for Boot Options/Settings",
++        Alert ? L"Alert! Press F2 or Down for Boot Options/Settings" :
++                L"Press F2 or Down for Boot Options/Settings",
+         White,
+         0,
+         0
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.h b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.h
+index 27ab3a2738..d2033be47c 100644
+--- a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.h
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.h
+@@ -153,3 +153,22 @@ PlatformBootManagerShowProgress (
+   IN UINTN                          Progress,
+   IN UINTN                          PreviousValue
+   );
++
++/**
++  Start watching for SATA SMART failures. Call before the disks are connected.
++**/
++VOID
++BootAlertsStart (
++  VOID
++  );
++
++/**
++  Show the alerts found before boot. Call after the disks are connected.
++
++  @retval TRUE   At least one alert was shown.
++  @retval FALSE  No alerts.
++**/
++BOOLEAN
++BootAlertsShow (
++  VOID
++  );
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
+index 8d87616ee7..91a03592c7 100644
+--- a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
+@@ -27,6 +27,7 @@
+   PlatformBootManager.c
+   PlatformBootManager.h
+   BootSplash.c
++  BootAlerts.c
+ 
+ [Packages]
+   MdePkg/MdePkg.dec
+@@ -56,6 +57,8 @@
+   Tcg2PhysicalPresenceLib
+   TpmPlatformHierarchyLib
+   CfrHelpersLib
++  IoLib
++  TimerLib
+ 
+ [Guids]
+   gEfiEndOfDxeEventGroupGuid
+@@ -75,6 +78,8 @@
+   gEfiPciRootBridgeIoProtocolGuid
+   gEdkiiPlatformBootManagerProtocolGuid  ## PRODUCES
+   gUefiPayloadNetworkStackPolicyGuid     ## SOMETIMES_PRODUCES
++  gEfiRscHandlerProtocolGuid             ## CONSUMES
++  gEfiNvmExpressPassThruProtocolGuid     ## CONSUMES
+ 
+ [Pcd]
+   gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut

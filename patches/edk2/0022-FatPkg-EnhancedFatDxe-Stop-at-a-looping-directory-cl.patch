@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 05:27:53 +0200
+Subject: [PATCH 22/25] FatPkg/EnhancedFatDxe: Stop at a looping directory
+ cluster chain
+
+FatPhysicalDirSize() follows a directory's cluster chain until it
+ends, and only stops early at a free or reserved cluster. A chain that
+points back into itself never ends: a FAT volume whose root directory
+cluster points to itself hangs the firmware in a loop that does no I/O
+as soon as the volume is mounted, for example when a USB stick is
+plugged in before boot.
+
+A chain can't have more clusters than the volume, so treat a longer
+one as corrupt, like the free and reserved cases.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ FatPkg/EnhancedFatDxe/FileSpace.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/FatPkg/EnhancedFatDxe/FileSpace.c b/FatPkg/EnhancedFatDxe/FileSpace.c
+index 909d4980d2..acd5360bce 100644
+--- a/FatPkg/EnhancedFatDxe/FileSpace.c
++++ b/FatPkg/EnhancedFatDxe/FileSpace.c
+@@ -657,6 +657,7 @@ FatPhysicalDirSize (
+   )
+ {
+   UINTN  Size;
++  UINTN  Remaining;
+ 
+   ASSERT_VOLUME_LOCKED (Volume);
+   //
+@@ -664,12 +665,16 @@ FatPhysicalDirSize (
+   //
+   Size = 0;
+   //
++  // A chain can't be longer than the volume's cluster count; a longer one loops.
++  //
++  Remaining = Volume->MaxCluster;
++  //
+   // N.B. ".." directories on some media do not contain a starting
+   // cluster.  In the case of "." or ".." we don't need the size anyway.
+   //
+   if (Cluster != 0) {
+     while (!FAT_END_OF_FAT_CHAIN (Cluster)) {
+-      if ((Cluster == FAT_CLUSTER_FREE) || (Cluster >= FAT_CLUSTER_SPECIAL)) {
++      if ((Cluster == FAT_CLUSTER_FREE) || (Cluster >= FAT_CLUSTER_SPECIAL) || (Remaining-- == 0)) {
+         DEBUG (
+           (DEBUG_INIT | DEBUG_ERROR,
+            "FATDirSize: cluster chain corrupt\n")

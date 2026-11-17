@@ -1,0 +1,277 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 02:23:58 +0200
+Subject: [PATCH 05/12] mb/dell/sklkbl_desktops: Add a CFR setup menu
+
+Add a setup menu grouped as Dasharo's System Features. Options that
+coreboot already has use its SoC and common Intel objects, with
+coreboot's names and help texts; the others take the names and help
+texts of Dell's setup.
+
+Firmware features go to the System Features menu, next to coreboot's
+Console:
+- Security Options: BIOS Lock.
+- Networking Options: Enable UEFI Network Stack.
+
+This machine's hardware goes to the Platform Setup Menu
+(CFR_OPTFLAG_PLATFORM):
+- CPU Configuration: Hyper-Threading (hidden on CPUs without it),
+  SpeedStep, Turbo Boost and CPU power states (C-states).
+- Chipset Configuration: VT-d, IGD DVMT Size and IGD Aperture Size.
+  The IGD objects are copies of the SoC ones without their dependency
+  on igd_enabled, which isn't in the menu.
+- PCI/PCIe Configuration: ASPM, L1 substates and clock PM.
+- Power Management Options: Restore AC power after loss, Deep Sleep
+  Control (the SoC deep_sx option), Fan Control Override and Block
+  Sleep.
+
+Block Sleep stops offering S1/S3 to the OS. The \OSFG override is
+written from mainboard_fill_gnvs(), which runs at the start of the
+DSDT, so sleepstates.asl sees it. In an SSDT it would come too late,
+since the DSDT's module-level code runs when it is loaded.
+
+Fan Control Override runs the fans at full speed. Bits 7:5 of the
+SCH555x PWM configuration registers select the mode, 0b011 is full
+speed (the same registers older Dell SCH5545 boards use). PWMs that
+Dell's table disables are left alone.
+
+PCIe clock PM barely matters here, since no root port has CLKREQ
+wired, but the common ASPM and L1 substates objects depend on it.
+L1 substates have no effect while ASPM is disabled.
+
+Left out on purpose: the iGPU toggle (these boards have no other
+graphics, so disabling the iGPU would leave no way back into setup),
+the PL1/PL2 power limits (the CPUs report no range, so nothing would
+stop a value beyond what the cooling is designed for; Dell's setup
+has none either), and S0ix (these desktop boards use S3).
+
+The Console form (log level, serial console) is added automatically.
+The menu is shown by MrChromebox's EDK2, and the values are stored as
+EFI variables in SMMSTORE.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/mainboard/dell/sklkbl_desktops/Kconfig    |   1 +
+ .../dell/sklkbl_desktops/Makefile.mk          |   1 +
+ src/mainboard/dell/sklkbl_desktops/cfr.c      | 134 ++++++++++++++++++
+ src/mainboard/dell/sklkbl_desktops/ramstage.c |  26 ++++
+ 4 files changed, 162 insertions(+)
+ create mode 100644 src/mainboard/dell/sklkbl_desktops/cfr.c
+
+diff --git a/src/mainboard/dell/sklkbl_desktops/Kconfig b/src/mainboard/dell/sklkbl_desktops/Kconfig
+index de963a6f6a..25afbeb2e6 100644
+--- a/src/mainboard/dell/sklkbl_desktops/Kconfig
++++ b/src/mainboard/dell/sklkbl_desktops/Kconfig
+@@ -3,6 +3,7 @@
+ config BOARD_DELL_SKLKBL_DESKTOPS_COMMON
+ 	bool
+ 	select AZALIA_USE_LEGACY_VERB_TABLE
++	select DRIVERS_OPTION_CFR_ENABLED if PAYLOAD_EDK2 && SMMSTORE
+ 	select BOARD_ROMSIZE_KB_16384
+ 	select HAVE_ACPI_RESUME
+ 	select HAVE_ACPI_TABLES
+diff --git a/src/mainboard/dell/sklkbl_desktops/Makefile.mk b/src/mainboard/dell/sklkbl_desktops/Makefile.mk
+index 3ecd5da0e8..4afb42813e 100644
+--- a/src/mainboard/dell/sklkbl_desktops/Makefile.mk
++++ b/src/mainboard/dell/sklkbl_desktops/Makefile.mk
+@@ -6,6 +6,7 @@ bootblock-y += variants/$(VARIANT_DIR)/early_gpio.c
+ romstage-y += variants/$(VARIANT_DIR)/romstage.c
+ 
+ ramstage-y += ramstage.c
++ramstage-$(CONFIG_DRIVERS_OPTION_CFR) += cfr.c
+ ramstage-y += variants/$(VARIANT_DIR)/gpio.c
+ ramstage-y += variants/$(VARIANT_DIR)/hda_verb.c
+ ramstage-$(CONFIG_MAINBOARD_USE_LIBGFXINIT) += variants/$(VARIANT_DIR)/gma-mainboard.ads
+diff --git a/src/mainboard/dell/sklkbl_desktops/cfr.c b/src/mainboard/dell/sklkbl_desktops/cfr.c
+new file mode 100644
+index 0000000000..ba6ea47819
+--- /dev/null
++++ b/src/mainboard/dell/sklkbl_desktops/cfr.c
+@@ -0,0 +1,134 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#include <boot/coreboot_tables.h>
++#include <drivers/option/cfr_frontend.h>
++#include <intelblocks/cfr.h>
++#include <soc/cfr.h>
++
++/* coreboot's IGD objects without their dependency on igd_enabled, which isn't in the menu */
++static const struct sm_object dell_igd_dvmt = SM_DECLARE_ENUM({
++	.opt_name	= "igd_dvmt_prealloc",
++	.ui_name	= "IGD DVMT Size",
++	.ui_helptext	= "Size of memory preallocated for internal graphics",
++	.default_value	= IGD_SM_64MB,
++	.values		= (const struct sm_enum_value[]) {
++				{ "32 MB",	IGD_SM_32MB	},
++				{ "64 MB",	IGD_SM_64MB	},
++				{ "96 MB",	IGD_SM_96MB	},
++				{ "128 MB",	IGD_SM_128MB	},
++				SM_ENUM_VALUE_END		},
++});
++
++static const struct sm_object dell_igd_aperture = SM_DECLARE_ENUM({
++	.opt_name	= "igd_aperture_size",
++	.ui_name	= "IGD Aperture Size",
++	.ui_helptext	= "Select the Aperture Size",
++	.default_value	= IGD_AP_SZ_256MB,
++	.values		= (const struct sm_enum_value[]) {
++				{ "128 MB",	IGD_AP_SZ_128MB	},
++				{ "256 MB",	IGD_AP_SZ_256MB	},
++				{ "512 MB",	IGD_AP_SZ_512MB	},
++				SM_ENUM_VALUE_END		},
++});
++
++static const struct sm_object block_sleep = SM_DECLARE_BOOL({
++	.opt_name	= "block_sleep",
++	.ui_name	= "Block Sleep",
++	.ui_helptext	= "Block the OS from putting the system to sleep (S3).",
++	.default_value	= false,
++});
++
++static const struct sm_object fan_full_speed = SM_DECLARE_BOOL({
++	.opt_name	= "fan_full_speed",
++	.ui_name	= "Fan Control Override",
++	.ui_helptext	= "Run the system fan at full speed. When enabled, the fan always runs"
++			  " at full speed, which is very loud. When disabled, the fan"
++			  " controller sets the speed from temperature data.",
++	.default_value	= false,
++});
++
++static const struct sm_object network_stack = SM_DECLARE_BOOL({
++	.opt_name	= "network_stack",
++	.ui_name	= "Enable UEFI Network Stack",
++	.ui_helptext	= "Enable or disable the UEFI network stack. When enabled, UEFI"
++			  " networking protocols are installed, so firmware features such as"
++			  " PXE boot can use the network.",
++	.default_value	= false,
++});
++
++static struct sm_obj_form security = {
++	.ui_name = "Security Options",
++	.obj_list = (const struct sm_object *[]) {
++		&bios_lock,
++		NULL
++	},
++};
++
++static struct sm_obj_form networking = {
++	.ui_name = "Networking Options",
++	.obj_list = (const struct sm_object *[]) {
++		&network_stack,
++		NULL
++	},
++};
++
++static struct sm_obj_form chipset = {
++	.flags = CFR_OPTFLAG_PLATFORM,
++	.ui_name = "Chipset Configuration",
++	.obj_list = (const struct sm_object *[]) {
++		&vtd,
++		&dell_igd_dvmt,
++		&dell_igd_aperture,
++		NULL
++	},
++};
++
++static struct sm_obj_form power = {
++	.flags = CFR_OPTFLAG_PLATFORM,
++	.ui_name = "Power Management Options",
++	.obj_list = (const struct sm_object *[]) {
++		&power_on_after_fail,
++		&deep_sx,
++		&fan_full_speed,
++		&block_sleep,
++		NULL
++	},
++};
++
++static struct sm_obj_form pcie = {
++	.flags = CFR_OPTFLAG_PLATFORM,
++	.ui_name = "PCI/PCIe Configuration",
++	.obj_list = (const struct sm_object *[]) {
++		&pciexp_aspm,
++		&pciexp_l1ss,
++		&pciexp_clk_pm,
++		NULL
++	},
++};
++
++static struct sm_obj_form cpu = {
++	.flags = CFR_OPTFLAG_PLATFORM,
++	.ui_name = "CPU Configuration",
++	.obj_list = (const struct sm_object *[]) {
++		&hyper_threading,
++		&eist,
++		&turbo_mode,
++		&c_states,
++		NULL
++	},
++};
++
++static struct sm_obj_form *sm_root[] = {
++	&security,
++	&networking,
++	&cpu,
++	&chipset,
++	&pcie,
++	&power,
++	NULL
++};
++
++void mb_cfr_setup_menu(struct lb_cfr *cfr_root)
++{
++	cfr_write_setup_menu(cfr_root, sm_root);
++}
+diff --git a/src/mainboard/dell/sklkbl_desktops/ramstage.c b/src/mainboard/dell/sklkbl_desktops/ramstage.c
+index bad6e4589a..93dd73ead6 100644
+--- a/src/mainboard/dell/sklkbl_desktops/ramstage.c
++++ b/src/mainboard/dell/sklkbl_desktops/ramstage.c
+@@ -1,8 +1,11 @@
+ /* SPDX-License-Identifier: GPL-2.0-only */
+ 
++#include <acpi/acpi_gnvs.h>
++#include <acpi/acpigen.h>
+ #include <bootstate.h>
+ #include <arch/cpuid.h>
+ #include <cpu/x86/msr.h>
++#include <option.h>
+ #include <soc/gpio.h>
+ #include <soc/ramstage.h>
+ #include "../../../include/variant/gpio.h"
+@@ -13,6 +16,17 @@ void mainboard_silicon_init_params(FSP_SIL_UPD *params)
+ 	variant_configure_gpios();
+ }
+ 
++void mainboard_fill_gnvs(struct global_nvs *gnvs)
++{
++	/*
++	 * This runs while the start of the DSDT is generated, so \OSFG exists
++	 * before sleepstates.asl checks it.
++	 */
++	if (get_uint_option("block_sleep", false))
++		acpigen_ssdt_override_sleep_states(false, false, false,
++						   !CONFIG(DISABLE_ACPI_HIBERNATE));
++}
++
+ #define FORM_FACTOR_MICRO	0
+ #define FORM_FACTOR_SFF		1
+ // Probably DT and MT
+@@ -505,6 +519,18 @@ static void sch5555_ec_hwm_init(void *arg)
+ 		sch555x_mbox_write(1, 0xeb, sch555x_mbox_read(1, 0xea));
+ 	}
+ 
++	/*
++	 * Bits 7:5 of the PWM configuration registers select the mode, 0b011 is
++	 * full speed. Leave the fans the table disables (0b100) off.
++	 */
++	if (get_uint_option("fan_full_speed", false)) {
++		for (uint16_t reg = 0x80; reg <= 0x82; reg++) {
++			const uint8_t val = sch555x_mbox_read(1, reg);
++			if ((val >> 5) != 0x4)
++				sch555x_mbox_write(1, reg, (val & 0x1f) | 0x60);
++		}
++	}
++
+ 	sch555x_mbox_write(1, 0x2fc, saved_2fc);
+ 	sch555x_mbox_read(1, 0xb8);
+ }

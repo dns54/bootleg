@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 03:54:03 +0200
+Subject: [PATCH 03/25] UefiPayloadPkg: Lock the TPM platform hierarchy before
+ boot
+
+The platform hierarchy belongs to the firmware. Without a password, the
+OS can use it to clear the TPM or change which PCR banks are active.
+Firmware normally sets a random password before it boots the OS, but
+UefiPayloadPkg never does, so the hierarchy stays open.
+
+Give it a random password with SecurityPkg's TpmPlatformHierarchyLib
+after the TPM physical presence requests have been processed, since
+those need it.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../Library/PlatformBootManagerLib/PlatformBootManager.c    | 6 ++++++
+ .../Library/PlatformBootManagerLib/PlatformBootManager.h    | 1 +
+ .../PlatformBootManagerLib/PlatformBootManagerLib.inf       | 1 +
+ UefiPayloadPkg/UefiPayloadPkg.dsc                           | 2 ++
+ 4 files changed, 10 insertions(+)
+
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+index 4117f4c214..3321193242 100644
+--- a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+@@ -576,6 +576,12 @@ PlatformBootManagerAfterConsole (
+ 	  Tcg2PhysicalPresenceLibProcessRequest (NULL); //Check for TPM2.0
+   }
+ 
++  //
++  // Nothing after this point needs the TPM platform hierarchy. Give it a random
++  // password, so the OS can't use it to clear the TPM or change its PCR banks.
++  //
++  ConfigureTpmPlatformHierarchy ();
++
+   //
+   // Register UEFI Shell
+   //
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.h b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.h
+index 13c70065bc..fd77d52396 100644
+--- a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.h
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.h
+@@ -29,6 +29,7 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
+ #include <Library/HobLib.h>
+ #include <Library/TcgPhysicalPresenceLib.h>
+ #include <Library/Tcg2PhysicalPresenceLib.h>
++#include <Library/TpmPlatformHierarchyLib.h>
+ #include <Protocol/SmmAccess2.h>
+ 
+ typedef struct {
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
+index d1a15df444..bac54904c1 100644
+--- a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
+@@ -54,6 +54,7 @@
+   HobLib
+   TcgPhysicalPresenceLib
+   Tcg2PhysicalPresenceLib
++  TpmPlatformHierarchyLib
+ 
+ [Guids]
+   gEfiEndOfDxeEventGroupGuid
+diff --git a/UefiPayloadPkg/UefiPayloadPkg.dsc b/UefiPayloadPkg/UefiPayloadPkg.dsc
+index 7a028eb129..62d885bdb1 100644
+--- a/UefiPayloadPkg/UefiPayloadPkg.dsc
++++ b/UefiPayloadPkg/UefiPayloadPkg.dsc
+@@ -531,7 +531,9 @@
+   TpmMeasurementLib|SecurityPkg/Library/DxeTpmMeasurementLib/DxeTpmMeasurementLib.inf
+   Tpm12DeviceLib|SecurityPkg/Library/Tpm12DeviceLibTcg/Tpm12DeviceLibTcg.inf
+   Tpm2DeviceLib|SecurityPkg/Library/Tpm2DeviceLibTcg2/Tpm2DeviceLibTcg2.inf
++  TpmPlatformHierarchyLib|SecurityPkg/Library/PeiDxeTpmPlatformHierarchyLib/PeiDxeTpmPlatformHierarchyLib.inf
+ !else
++  TpmPlatformHierarchyLib|SecurityPkg/Library/PeiDxeTpmPlatformHierarchyLibNull/PeiDxeTpmPlatformHierarchyLib.inf
+   TpmMeasurementLib|MdeModulePkg/Library/TpmMeasurementLibNull/TpmMeasurementLibNull.inf
+   TcgPhysicalPresenceLib|UefiPayloadPkg/Library/TcgPhysicalPresenceLibNull/DxeTcgPhysicalPresenceLib.inf
+   Tcg2PhysicalPresenceLib|OvmfPkg/Library/Tcg2PhysicalPresenceLibNull/DxeTcg2PhysicalPresenceLib.inf

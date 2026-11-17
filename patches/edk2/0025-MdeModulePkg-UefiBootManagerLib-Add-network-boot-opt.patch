@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 22:37:05 +0200
+Subject: [PATCH 25/25] MdeModulePkg/UefiBootManagerLib: Add network boot
+ options last with External priority
+
+"Treat network boot paths as external" counts a network boot option (a
+MAC, IPv4, IPv6 or URI node in the device path) as removable. With
+PRIORITIZE_INTERNAL that puts it after the disks, but with external
+priority it goes to the front of BootOrder, next to USB: with a NIC
+driver, every boot tried PXE on each NIC before the OS.
+
+Add network boot options at the end of BootOrder with external
+priority too, after the disks, as Dell's boot sequence does.
+
+Also scan the whole device path. The scan stopped at the first USB
+node, and a USB network adapter's MAC node comes after it, so the
+adapter's PXE options counted as USB and still went first.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ MdeModulePkg/Library/UefiBootManagerLib/BmBoot.c | 15 ++++++++-------
+ 1 file changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/MdeModulePkg/Library/UefiBootManagerLib/BmBoot.c b/MdeModulePkg/Library/UefiBootManagerLib/BmBoot.c
+index e6bb88b228..28a994e8c1 100644
+--- a/MdeModulePkg/Library/UefiBootManagerLib/BmBoot.c
++++ b/MdeModulePkg/Library/UefiBootManagerLib/BmBoot.c
+@@ -2829,6 +2829,7 @@ EfiBootManagerRefreshAllBootOption (
+     if (EfiBootManagerFindLoadOption (&BootOptions[Index], NvBootOptions, NvBootOptionCount) == -1) {
+       UINTN   InsertPosition;
+       BOOLEAN IsRemovable;
++      BOOLEAN IsNetwork;
+       EFI_HANDLE  Handle;
+       EFI_BLOCK_IO_PROTOCOL  *BlkIo;
+       EFI_DEVICE_PATH_PROTOCOL  *TempDevicePath;
+@@ -2839,6 +2840,7 @@ EfiBootManagerRefreshAllBootOption (
+       // then check BlockIo RemovableMedia flag
+       //
+       IsRemovable = FALSE;
++      IsNetwork   = FALSE;
+ 
+       //
+       // Check device path for USB or network nodes - both are external.
+@@ -2850,20 +2852,18 @@ EfiBootManagerRefreshAllBootOption (
+       for (Node = BootOptions[Index].FilePath; !IsDevicePathEnd (Node); Node = NextDevicePathNode (Node)) {
+         if (DevicePathType (Node) == MESSAGING_DEVICE_PATH) {
+           switch (DevicePathSubType (Node)) {
+-            case MSG_USB_DP:
+             case MSG_MAC_ADDR_DP:
+             case MSG_IPv4_DP:
+             case MSG_IPv6_DP:
+             case MSG_URI_DP:
++              IsNetwork = TRUE;
++            // Fall through
++            case MSG_USB_DP:
+               IsRemovable = TRUE;
+               break;
+             default:
+               break;
+           }
+-
+-          if (IsRemovable) {
+-            break;
+-          }
+         }
+       }
+ 
+@@ -2892,8 +2892,9 @@ EfiBootManagerRefreshAllBootOption (
+       // Internal priority (1): fixed devices at front (0), removable at end (-1)
+       //
+       if (BootDevicePriority == 0) {
+-        // External priority: external devices at front, internal at end
+-        InsertPosition = IsRemovable ? 0 : (UINTN)-1;
++        // External priority: external devices at front, internal at end; network boot after the
++        // disks, as in Dell's boot sequence
++        InsertPosition = (IsRemovable && !IsNetwork) ? 0 : (UINTN)-1;
+       } else {
+         // Internal priority: internal devices at front, external at end
+         InsertPosition = IsRemovable ? (UINTN)-1 : 0;

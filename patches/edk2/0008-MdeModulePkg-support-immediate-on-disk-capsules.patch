@@ -1,0 +1,415 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sergii Dmytruk <sergii.dmytruk@3mdeb.com>
+Date: Tue, 6 Jan 2026 01:08:23 +0200
+Subject: [PATCH 08/25] MdeModulePkg: support "immediate" on-disk capsules
+
+That is loading and processing on-disk capsules during the same boot
+without relocating the capsules to a dedicated non-volatile storage on
+ESP or loading them as in-RAM capsules and then rebooting.
+
+Signed-off-by: Sergii Dmytruk <sergii.dmytruk@3mdeb.com>
+Link: https://github.com/Dasharo/edk2/commit/b828f7bf3edd733ff3b696b6cbc48bdc94ba4f61
+[Deividas Nastajus: CapsuleLib.h hunks applied by hand (#pragma once); added the CoDGetAll rename from Dasharo's 2b93ded2ef24; dropped CoDPresent(), which nothing calls]
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ MdeModulePkg/Include/Library/CapsuleLib.h     | 52 ++++++++++++++
+ .../Library/DxeCapsuleLibFmp/CapsuleOnDisk.c  | 32 +++++----
+ .../Library/DxeCapsuleLibFmp/CapsuleOnDisk.h  | 12 ----
+ .../DxeCapsuleLibFmp/DxeCapsuleProcessLib.c   | 69 ++++++++++++++++++-
+ .../CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf   |  1 +
+ .../CapsuleRuntimeDxe/CapsuleService.c        |  9 ++-
+ 6 files changed, 147 insertions(+), 28 deletions(-)
+
+diff --git a/MdeModulePkg/Include/Library/CapsuleLib.h b/MdeModulePkg/Include/Library/CapsuleLib.h
+index 1ff2227c50..8313746242 100644
+--- a/MdeModulePkg/Include/Library/CapsuleLib.h
++++ b/MdeModulePkg/Include/Library/CapsuleLib.h
+@@ -9,6 +9,20 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
+ 
+ #pragma once
+ 
++#include <Guid/FileInfo.h>
++
++typedef struct {
++  //
++  // image address.
++  //
++  VOID             *ImageAddress;
++  //
++  // The file info of the image comes from.
++  //  if FileInfo == NULL. means image does not come from file
++  //
++  EFI_FILE_INFO    *FileInfo;
++} IMAGE_INFO;
++
+ //
+ // BOOLEAN Variable to indicate whether system is in the capsule on disk state.
+ //
+@@ -155,3 +169,41 @@ EFIAPI
+ CoDRemoveTempFile (
+   UINTN  MaxRetry
+   );
++
++/**
++  This routine is called to get all capsules from file. The capsule file image is
++  copied to BS memory. Caller is responsible to free them.
++
++  @param[in]    MaxRetry             Max Connection Retry. Stall 100ms between each connection try to ensure
++                                     devices like USB can get enumerated.
++  @param[out]   CapsulePtr           Copied Capsule file Image Info buffer
++  @param[out]   CapsuleNum           CapsuleNumber
++  @param[out]   FsHandle             File system handle
++  @param[out]   LoadOptionNumber     OptionNumber of boot option
++
++  @retval EFI_SUCCESS  Succeed to get all capsules.
++
++**/
++EFI_STATUS
++EFIAPI
++CoDGetAll (
++  IN  UINTN       MaxRetry,
++  OUT IMAGE_INFO  **CapsulePtr,
++  OUT UINTN       *CapsuleNum,
++  OUT EFI_HANDLE  *FsHandle,
++  OUT UINT16      *LoadOptionNumber
++  );
++
++/**
++  Free resources allocated by CoDGetAll.
++
++  @param[in]  ImageInfo  An array of data and information of files
++  @param[in]  Count      Length of the array.
++
++**/
++VOID
++EFIAPI
++CoDFreeImages (
++  IN IMAGE_INFO  *ImageInfo,
++  IN UINTN       Count
++  );
+diff --git a/MdeModulePkg/Library/DxeCapsuleLibFmp/CapsuleOnDisk.c b/MdeModulePkg/Library/DxeCapsuleLibFmp/CapsuleOnDisk.c
+index f97b76c3df..d181a345cb 100644
+--- a/MdeModulePkg/Library/DxeCapsuleLibFmp/CapsuleOnDisk.c
++++ b/MdeModulePkg/Library/DxeCapsuleLibFmp/CapsuleOnDisk.c
+@@ -1147,7 +1147,8 @@ EXIT:
+ 
+ **/
+ EFI_STATUS
+-GetAllCapsuleOnDisk (
++EFIAPI
++CoDGetAll (
+   IN  UINTN       MaxRetry,
+   OUT IMAGE_INFO  **CapsulePtr,
+   OUT UINTN       *CapsuleNum,
+@@ -1187,7 +1188,7 @@ GetAllCapsuleOnDisk (
+                       0
+                       );
+   if (EFI_ERROR (Status)) {
+-    DEBUG ((DEBUG_ERROR, "GetAllCapsuleOnDisk fail to open RootDir!\n"));
++    DEBUG ((DEBUG_ERROR, "CoDGetAll fail to open RootDir!\n"));
+     RootDir->Close (RootDir);
+     return Status;
+   }
+@@ -1319,6 +1320,10 @@ CoDCheckCapsuleOnDiskFlag (
+   UINT64      OsIndication;
+   UINTN       DataSize;
+ 
++  if (!PcdGetBool (PcdCapsuleOnDiskSupport)) {
++    return FALSE;
++  }
++
+   //
+   // Check File Capsule Delivery Supported Flag in OsIndication variable
+   //
+@@ -1421,14 +1426,15 @@ CoDClearCapsuleRelocationInfo (
+ }
+ 
+ /**
+-  Free resources allocated by GetAllCapsuleOnDisk.
++  Free resources allocated by CoDGetAll.
+ 
+   @param[in]  ImageInfo  An array of data and information of files
+   @param[in]  Count      Length of the array.
+ 
+ **/
+ VOID
+-FreeImageInfos (
++EFIAPI
++CoDFreeImages (
+   IN IMAGE_INFO  *ImageInfo,
+   IN UINTN       Count
+   )
+@@ -1504,9 +1510,9 @@ RelocateCapsuleToDisk (
+   //
+   // 1. Load all Capsule On Disks in to memory
+   //
+-  Status = GetAllCapsuleOnDisk (MaxRetry, &CapsuleOnDiskBuf, &CapsuleOnDiskNum, &Handle, &LoadOptionNumber);
++  Status = CoDGetAll (MaxRetry, &CapsuleOnDiskBuf, &CapsuleOnDiskNum, &Handle, &LoadOptionNumber);
+   if (EFI_ERROR (Status) || (CapsuleOnDiskNum == 0) || (CapsuleOnDiskBuf == NULL)) {
+-    DEBUG ((DEBUG_INFO, "RelocateCapsule: GetAllCapsuleOnDisk Status - %r\n", Status));
++    DEBUG ((DEBUG_INFO, "RelocateCapsule: CoDGetAll Status - %r\n", Status));
+     return EFI_NOT_FOUND;
+   }
+ 
+@@ -1743,7 +1749,7 @@ EXIT:
+     FreePool (CapsuleDataBuf);
+   }
+ 
+-  FreeImageInfos (CapsuleOnDiskBuf, CapsuleOnDiskNum);
++  CoDFreeImages (CapsuleOnDiskBuf, CapsuleOnDiskNum);
+ 
+   if (TempCodFile != NULL) {
+     if (EFI_ERROR (Status)) {
+@@ -1801,9 +1807,9 @@ RelocateCapsuleToRam (
+   //
+   // 1. Load all Capsule On Disks into memory
+   //
+-  Status = GetAllCapsuleOnDisk (MaxRetry, &CapsuleOnDiskBuf, &CapsuleOnDiskNum, &Handle, NULL);
++  Status = CoDGetAll (MaxRetry, &CapsuleOnDiskBuf, &CapsuleOnDiskNum, &Handle, NULL);
+   if (EFI_ERROR (Status) || (CapsuleOnDiskNum == 0) || (CapsuleOnDiskBuf == NULL)) {
+-    DEBUG ((DEBUG_ERROR, "GetAllCapsuleOnDisk Status - %r\n", Status));
++    DEBUG ((DEBUG_ERROR, "CoDGetAll Status - %r\n", Status));
+     return EFI_NOT_FOUND;
+   }
+ 
+@@ -1813,7 +1819,7 @@ RelocateCapsuleToRam (
+   CapsuleBuffer = AllocateZeroPool ((CapsuleOnDiskNum + 1) * sizeof (VOID *));
+   if (CapsuleBuffer == NULL) {
+     DEBUG ((DEBUG_ERROR, "Fail to allocate memory for capsules.\n"));
+-    FreeImageInfos (CapsuleOnDiskBuf, CapsuleOnDiskNum);
++    CoDFreeImages (CapsuleOnDiskBuf, CapsuleOnDiskNum);
+     return EFI_OUT_OF_RESOURCES;
+   }
+ 
+@@ -1821,7 +1827,7 @@ RelocateCapsuleToRam (
+   if (CapsuleSize == NULL) {
+     DEBUG ((DEBUG_ERROR, "Fail to allocate memory for capsules.\n"));
+     FreePool (CapsuleBuffer);
+-    FreeImageInfos (CapsuleOnDiskBuf, CapsuleOnDiskNum);
++    CoDFreeImages (CapsuleOnDiskBuf, CapsuleOnDiskNum);
+     return EFI_OUT_OF_RESOURCES;
+   }
+ 
+@@ -1844,7 +1850,7 @@ RelocateCapsuleToRam (
+     DEBUG ((DEBUG_ERROR, "Fail to allocate memory for name capsule.\n"));
+     FreePool (CapsuleBuffer);
+     FreePool (CapsuleSize);
+-    FreeImageInfos (CapsuleOnDiskBuf, CapsuleOnDiskNum);
++    CoDFreeImages (CapsuleOnDiskBuf, CapsuleOnDiskNum);
+     return EFI_OUT_OF_RESOURCES;
+   }
+ 
+@@ -1874,7 +1880,7 @@ BuildGather:
+     if (FileNameCapsule != NULL) {
+       FreePool (FileNameCapsule);
+     }
+-    FreeImageInfos (CapsuleOnDiskBuf, CapsuleOnDiskNum);
++    CoDFreeImages (CapsuleOnDiskBuf, CapsuleOnDiskNum);
+ 
+     return EFI_OUT_OF_RESOURCES;
+   }
+diff --git a/MdeModulePkg/Library/DxeCapsuleLibFmp/CapsuleOnDisk.h b/MdeModulePkg/Library/DxeCapsuleLibFmp/CapsuleOnDisk.h
+index 357f6fa17b..2c03efe9b5 100644
+--- a/MdeModulePkg/Library/DxeCapsuleLibFmp/CapsuleOnDisk.h
++++ b/MdeModulePkg/Library/DxeCapsuleLibFmp/CapsuleOnDisk.h
+@@ -58,15 +58,3 @@ typedef struct {
+   CHAR16           *FileNameFirstPart;   ///  Text to the left of right-most period in the file name. String is capitialized
+   CHAR16           *FileNameSecondPart;  ///  Text to the right of right-most period in the file name.String is capitialized. Maybe NULL
+ } FILE_INFO_ENTRY;
+-
+-typedef struct {
+-  //
+-  // image address.
+-  //
+-  VOID             *ImageAddress;
+-  //
+-  // The file info of the image comes from.
+-  //  if FileInfo == NULL. means image does not come from file
+-  //
+-  EFI_FILE_INFO    *FileInfo;
+-} IMAGE_INFO;
+diff --git a/MdeModulePkg/Library/DxeCapsuleLibFmp/DxeCapsuleProcessLib.c b/MdeModulePkg/Library/DxeCapsuleLibFmp/DxeCapsuleProcessLib.c
+index 84e90aae6b..53b1610ffe 100644
+--- a/MdeModulePkg/Library/DxeCapsuleLibFmp/DxeCapsuleProcessLib.c
++++ b/MdeModulePkg/Library/DxeCapsuleLibFmp/DxeCapsuleProcessLib.c
+@@ -233,11 +233,18 @@ InitCapsulePtr (
+   UINTN                 CapsuleNameCapsuleTotalNumber;
+   VOID                  **CapsuleNameCapsulePtr;
+   EFI_PHYSICAL_ADDRESS  *CapsuleNameAddress;
++  EFI_STATUS            Status;
++  UINTN                 CapsuleOnDiskNum;
++  IMAGE_INFO            *CapsuleOnDiskBuf;
++  EFI_HANDLE            EspFsHandle;
++  UINT16                LoadOptionNumber;
+ 
+   CapsuleNameNumber             = 0;
+   CapsuleNameTotalNumber        = 0;
+   CapsuleNameCapsuleTotalNumber = 0;
++  CapsuleOnDiskNum              = 0;
+   CapsuleNameCapsulePtr         = NULL;
++  CapsuleOnDiskBuf              = NULL;
+ 
+   //
+   // Find all capsule images from hob
+@@ -257,6 +264,34 @@ InitCapsulePtr (
+     HobPointer.Raw = GET_NEXT_HOB (HobPointer);
+   }
+ 
++  if (CoDCheckCapsuleOnDiskFlag ()) {
++    //
++    // Load all Capsule On Disks into memory to process them during this boot.
++    // This may need some PCD (could call it "immediate on-disk capsules") to
++    // control this functionality.
++    //
++    // Hard-coding MaxRetry to 3 as a sane default to not introduce parameters
++    // up the call chain.  Maybe the value should have a PCD.
++    //
++    CapsuleOnDiskBuf = NULL;
++    Status           = CoDGetAll (
++                         /*MaxRetry=*/3,
++                         &CapsuleOnDiskBuf,
++                         &CapsuleOnDiskNum,
++                         &EspFsHandle,
++                         &LoadOptionNumber
++                         );
++    if (EFI_ERROR (Status) || CapsuleOnDiskBuf == NULL) {
++      DEBUG ((DEBUG_WARN, "%a(): CoDGetAll Status: %r.\n", __func__, Status));
++      // Don't return, this isn't a fatal error, just ensure no weird fails.
++      CapsuleOnDiskNum = 0;
++    }
++
++    mCapsuleTotalNumber += CapsuleOnDiskNum;
++
++    DEBUG ((DEBUG_INFO, "%a(): loaded %d on-disk capsule(s)\n", __func__, CapsuleOnDiskNum));
++  }
++
+   DEBUG ((DEBUG_INFO, "mCapsuleTotalNumber - 0x%x\n", mCapsuleTotalNumber));
+ 
+   if (mCapsuleTotalNumber == 0) {
+@@ -270,12 +305,14 @@ InitCapsulePtr (
+   if (mCapsulePtr == NULL) {
+     DEBUG ((DEBUG_ERROR, "Allocate mCapsulePtr fail!\n"));
+     mCapsuleTotalNumber = 0;
++    CoDFreeImages (CapsuleOnDiskBuf, CapsuleOnDiskNum);
+     return;
+   }
+ 
+   mCapsuleStatusArray = (EFI_STATUS *)AllocateZeroPool (sizeof (EFI_STATUS) * mCapsuleTotalNumber);
+   if (mCapsuleStatusArray == NULL) {
+     DEBUG ((DEBUG_ERROR, "Allocate mCapsuleStatusArray fail!\n"));
++    CoDFreeImages (CapsuleOnDiskBuf, CapsuleOnDiskNum);
+     FreePool (mCapsulePtr);
+     mCapsulePtr         = NULL;
+     mCapsuleTotalNumber = 0;
+@@ -287,6 +324,7 @@ InitCapsulePtr (
+   CapsuleNameCapsulePtr =  (VOID **)AllocateZeroPool (sizeof (VOID *) * CapsuleNameCapsuleTotalNumber);
+   if (CapsuleNameCapsulePtr == NULL) {
+     DEBUG ((DEBUG_ERROR, "Allocate CapsuleNameCapsulePtr fail!\n"));
++    CoDFreeImages (CapsuleOnDiskBuf, CapsuleOnDiskNum);
+     FreePool (mCapsulePtr);
+     FreePool (mCapsuleStatusArray);
+     mCapsulePtr         = NULL;
+@@ -311,6 +349,10 @@ InitCapsulePtr (
+     HobPointer.Raw = GET_NEXT_HOB (HobPointer);
+   }
+ 
++  for (Index2 = 0; Index2 < CapsuleOnDiskNum; Index2++) {
++    mCapsulePtr[Index++] = CapsuleOnDiskBuf[Index2].ImageAddress;
++  }
++
+   //
+   // Find Capsule On Disk Names
+   //
+@@ -321,10 +363,15 @@ InitCapsulePtr (
+     }
+   }
+ 
++  //
++  // XXX: could use file names from CapsuleOnDiskBuf for capsule names as if
++  //      they came from name capsules.
++  //
+   if (CapsuleNameTotalNumber == mCapsuleTotalNumber) {
+     mCapsuleNamePtr = (CHAR16 **)AllocateZeroPool (sizeof (CHAR16 *) * mCapsuleTotalNumber);
+     if (mCapsuleNamePtr == NULL) {
+       DEBUG ((DEBUG_ERROR, "Allocate mCapsuleNamePtr fail!\n"));
++      CoDFreeImages (CapsuleOnDiskBuf, CapsuleOnDiskNum);
+       FreePool (mCapsulePtr);
+       FreePool (mCapsuleStatusArray);
+       FreePool (CapsuleNameCapsulePtr);
+@@ -346,6 +393,13 @@ InitCapsulePtr (
+     mCapsuleNamePtr = NULL;
+   }
+ 
++  for (Index = 0; Index < CapsuleOnDiskNum; Index++) {
++    FreePool (CapsuleOnDiskBuf[Index].FileInfo);
++  }
++  if (CapsuleOnDiskNum != 0) {
++    FreePool (CapsuleOnDiskBuf);
++  }
++
+   FreePool (CapsuleNameCapsulePtr);
+ }
+ 
+@@ -517,9 +571,15 @@ ProcessTheseCapsules (
+   BOOLEAN                   ResetRequired;
+   CHAR16                    *CapsuleName;
+ 
++  DEBUG ((DEBUG_ERROR, "%a(): Round #%d.\n", __func__, FirstRound ? 1 : 2));
++
+   REPORT_STATUS_CODE (EFI_PROGRESS_CODE, (EFI_SOFTWARE | PcdGet32 (PcdStatusCodeSubClassCapsule) | PcdGet32 (PcdCapsuleStatusCodeProcessCapsulesBegin)));
+ 
+-  if (FirstRound) {
++  //
++  // Working around on-disk capsules not being discovered on the first round
++  // because storage devices are uninitialized then.
++  //
++  if (FirstRound || (PcdGetBool (PcdCapsuleOnDiskSupport) && mCapsuleTotalNumber == 0)) {
+     InitCapsulePtr ();
+   }
+ 
+@@ -696,7 +756,12 @@ ProcessCapsules (
+     // Reboot System if and only if all capsule processed.
+     // If not, defer reset to 2nd process.
+     //
+-    if (mNeedReset && AreAllImagesProcessed ()) {
++    // Not resetting if there were no capsules for on-disk capsules, because
++    // they aren't discovered until the second round.
++    //
++    if (mNeedReset &&
++        (!CoDCheckCapsuleOnDiskFlag () || mCapsuleTotalNumber != 0) &&
++        AreAllImagesProcessed ()) {
+       DoResetSystem ();
+     }
+   } else {
+diff --git a/MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf b/MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
+index bc32fc38ff..37431ccab3 100644
+--- a/MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
++++ b/MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
+@@ -95,6 +95,7 @@
+   gEfiMdeModulePkgTokenSpaceGuid.PcdMaxSizeNonPopulateCapsule   ## SOMETIMES_CONSUMES
+   gEfiMdeModulePkgTokenSpaceGuid.PcdMaxSizePopulateCapsule      ## SOMETIMES_CONSUMES # Populate Image requires reset support.
+   gEfiMdeModulePkgTokenSpaceGuid.PcdCapsuleInRamSupport         ## CONSUMES
++  gEfiMdeModulePkgTokenSpaceGuid.PcdCapsuleOnDiskSupport        ## SOMETIMES_CONSUMES
+ 
+ [Pcd.X64]
+   gEfiMdeModulePkgTokenSpaceGuid.PcdCapsulePeiLongModeStackSize   ## SOMETIMES_CONSUMES
+diff --git a/MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleService.c b/MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleService.c
+index f8047c23e1..46c664989c 100644
+--- a/MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleService.c
++++ b/MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleService.c
+@@ -346,7 +346,14 @@ QueryCapsuleCapabilities (
+     //
+     // Check if the platform supports update capsule across a system reset
+     //
+-    if (!IsPersistAcrossResetCapsuleSupported ()) {
++    // Because we don't know whether a capsule is going to be submitted as a
++    // file or a memory buffer, avoid failing if on-disk capsules are supported.
++    // Importantly, don't move this check into
++    // IsPersistAcrossResetCapsuleSupported() and let it fail in UpdateCapsule()
++    // if that gets invoked to submit an in-RAM capsule.
++    //
++    if (!IsPersistAcrossResetCapsuleSupported () &&
++        !FixedPcdGetBool (PcdCapsuleOnDiskSupport)) {
+       return EFI_UNSUPPORTED;
+     }
+ 

@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 18:45:19 +0200
+Subject: [PATCH 24/29] security/tpm/tss/tcg-2.0: Reject PCR selections larger
+ than pcrSelect[]
+
+The TPM_CAP_PCRS response gives each bank's sizeofSelect, which
+tlcl2_get_capability_pcrs() uses to memcpy() pcrSelect[] into a
+caller's struct, and the TPM 2.0 log code then scans that many bytes.
+pcrSelect[] holds PCR_SELECT_MAX (3) bytes, enough for the 24 PCRs of
+a PC Client TPM, but the value comes from the TPM unchecked: a faulty
+TPM, or a device on the LPC bus pretending to be one, can make
+coreboot write up to 252 bytes past the array on the stack.
+
+Fail the unmarshalling when sizeofSelect doesn't fit, as is already
+done when there are more banks than pcrSelections[] holds.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/security/tpm/tss/tcg-2.0/tss_marshaling.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/security/tpm/tss/tcg-2.0/tss_marshaling.c b/src/security/tpm/tss/tcg-2.0/tss_marshaling.c
+index 121d7bb1d9..a65c1fd57a 100644
+--- a/src/security/tpm/tss/tcg-2.0/tss_marshaling.c
++++ b/src/security/tpm/tss/tcg-2.0/tss_marshaling.c
+@@ -498,6 +498,9 @@ static int unmarshal_get_capability(struct ibuf *ib,
+ 			TPMS_PCR_SELECTION *pp =
+ 				&gcr->cd.data.assignedPCR.pcrSelections[i];
+ 			rc |= ibuf_read(ib, pp, sizeof(TPMS_PCR_SELECTION));
++			/* Callers copy and scan sizeofSelect bytes of pcrSelect[] */
++			if (pp->sizeofSelect > ARRAY_SIZE(pp->pcrSelect))
++				return -1;
+ 		}
+ 		break;
+ 	default:

@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 22:27:17 +0200
+Subject: [PATCH 03/12] mb/dell/optiplex_3050: Disable hotplug on the WiFi M.2
+ slot too
+
+The WiFi M.2 slot (RP8) is inside the case and can't be hot-swapped
+either. With hotplug enabled, Linux's pciehp treats a short link drop
+as the card being removed and re-added, so a NIC in this slot
+disappears and comes back as a new device, with its bridges. Without
+hotplug, the same link drop goes through error recovery and the
+device keeps its identity.
+
+bootleg's production machine uses this slot for an Intel I226-V NIC.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../dell/sklkbl_desktops/variants/optiplex_3050/overridetree.cb | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/overridetree.cb b/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/overridetree.cb
+index ff48a8121a..911c8c3ba6 100644
+--- a/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/overridetree.cb
++++ b/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/overridetree.cb
+@@ -36,7 +36,7 @@ chip soc/intel/skylake
+ 		# M.2 WiFi
+ 		device ref pcie_rp8 on
+ 			register "PcieRpClkReqSupport[7]"		= "false"
+-			register "PcieRpHotPlug[7]"			= "1"
++			register "PcieRpHotPlug[7]"			= "0"
+ 		end
+ 
+ 		# M.2 SSD

@@ -1,0 +1,292 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:10:00 +0200
+Subject: [PATCH 13/25] UefiPayloadPkg: Handle the boot watchdog at ReadyToBoot
+
+coreboot can arm the Intel PCH TCO timer early in boot, so a hang before
+the first boot attempt resets the system. Add TcoWatchdogDxe, which acts
+on coreboot's "watchdog" setup option at each ReadyToBoot:
+- Boot Only (1): halt the timer, as the OS loader takes over.
+- Boot and OS (2): clear a first timeout and reload the timer, so the
+  OS gets the full window to start its own watchdog driver.
+
+Loading the setup app (UiApp) or the boot manager menu halts the timer
+in either mode, so a user can take their time there. Launching the boot
+manager menu doesn't signal ReadyToBoot. On a capsule update boot the
+driver halts the timer right away, so a reset can't interrupt a flash
+write.
+
+It finds the timer through the SMBus controller's TCOBASE and does
+nothing if the timer isn't running.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../TcoWatchdogDxe/TcoWatchdogDxe.c           | 182 ++++++++++++++++++
+ .../TcoWatchdogDxe/TcoWatchdogDxe.inf         |  43 +++++
+ UefiPayloadPkg/UefiPayloadPkg.dsc             |   1 +
+ UefiPayloadPkg/UefiPayloadPkg.fdf             |   1 +
+ 4 files changed, 227 insertions(+)
+ create mode 100644 UefiPayloadPkg/TcoWatchdogDxe/TcoWatchdogDxe.c
+ create mode 100644 UefiPayloadPkg/TcoWatchdogDxe/TcoWatchdogDxe.inf
+
+diff --git a/UefiPayloadPkg/TcoWatchdogDxe/TcoWatchdogDxe.c b/UefiPayloadPkg/TcoWatchdogDxe/TcoWatchdogDxe.c
+new file mode 100644
+index 0000000000..0a64211ad5
+--- /dev/null
++++ b/UefiPayloadPkg/TcoWatchdogDxe/TcoWatchdogDxe.c
+@@ -0,0 +1,182 @@
++/** @file
++  Handle the boot watchdog that coreboot arms in the Intel PCH TCO timer.
++
++  The "Watchdog Timer Support" setup option picks what happens at a boot attempt: "Boot Only"
++  halts the timer, "Boot and OS" reloads it and leaves it to the OS. Setup and the boot manager
++  halt it either way, and a capsule update boot halts it right away.
++
++  SPDX-License-Identifier: BSD-2-Clause-Patent
++**/
++
++#include <PiDxe.h>
++#include <IndustryStandard/Pci.h>
++#include <Protocol/LoadedImage.h>
++#include <Library/BaseMemoryLib.h>
++#include <Library/CfrHelpersLib.h>
++#include <Library/DebugLib.h>
++#include <Library/DevicePathLib.h>
++#include <Library/HobLib.h>
++#include <Library/IoLib.h>
++#include <Library/PciLib.h>
++#include <Library/PcdLib.h>
++#include <Library/UefiBootServicesTableLib.h>
++#include <Library/UefiLib.h>
++
++#define SMBUS_PCI          PCI_LIB_ADDRESS (0, 0x1f, 4, 0)
++#define SMBUS_TCOBASE      0x50
++#define SMBUS_TCOCTL       0x54
++#define  TCO_BASE_EN       BIT8
++#define TCO_RLD            0x00
++#define TCO1_STS           0x04
++#define  TCO1_STS_TIMEOUT  BIT3
++#define TCO1_CNT           0x08
++#define  TCO1_TMR_HLT      BIT11
++
++// coreboot's watchdog option value
++#define WATCHDOG_BOOT_AND_OS  2
++
++// UiApp's FILE_GUID: the setup front page
++STATIC CONST EFI_GUID  mUiAppFile = {
++  0x462CAA21, 0x7614, 0x4503, { 0x83, 0x6E, 0x8A, 0xB6, 0xF4, 0x66, 0x23, 0x31 }
++};
++
++STATIC UINT16  mTcoBase;
++STATIC VOID    *mImageRegistration;
++
++/**
++  Halt the TCO timer.
++**/
++STATIC
++VOID
++HaltWatchdog (
++  VOID
++  )
++{
++  IoOr16 (mTcoBase + TCO1_CNT, TCO1_TMR_HLT);
++  DEBUG ((DEBUG_INFO, "TcoWatchdog: halted\n"));
++}
++
++/**
++  At a boot attempt, halt the timer, or with "Boot and OS" restart its countdown for the OS.
++
++  @param[in]  Event    The ReadyToBoot event.
++  @param[in]  Context  Unused.
++**/
++STATIC
++VOID
++EFIAPI
++OnReadyToBoot (
++  IN EFI_EVENT  Event,
++  IN VOID       *Context
++  )
++{
++  if (CfrOptionGetUint32 ("watchdog", 0) != WATCHDOG_BOOT_AND_OS) {
++    HaltWatchdog ();
++    return;
++  }
++
++  //
++  // Clear a pending timeout and reload. Once SMM is up, coreboot's SMI handler resets on the
++  // first timeout, so the OS gets one full TCO period.
++  //
++  IoWrite16 (mTcoBase + TCO1_STS, TCO1_STS_TIMEOUT);
++  IoWrite16 (mTcoBase + TCO_RLD, 1);
++  IoAnd16 (mTcoBase + TCO1_CNT, (UINT16) ~TCO1_TMR_HLT);
++  DEBUG ((DEBUG_INFO, "TcoWatchdog: running for the OS\n"));
++}
++
++/**
++  Halt the timer when the setup or boot manager app is loaded. Launching the boot manager
++  doesn't signal ReadyToBoot.
++
++  @param[in]  Event    The LoadedImage protocol notification.
++  @param[in]  Context  Unused.
++**/
++STATIC
++VOID
++EFIAPI
++OnImageLoaded (
++  IN EFI_EVENT  Event,
++  IN VOID       *Context
++  )
++{
++  EFI_HANDLE                 Handle;
++  UINTN                      Size;
++  EFI_LOADED_IMAGE_PROTOCOL  *Image;
++  EFI_GUID                   *File;
++
++  while (TRUE) {
++    Size = sizeof (Handle);
++    if (EFI_ERROR (
++          gBS->LocateHandle (
++                 ByRegisterNotify,
++                 NULL,
++                 mImageRegistration,
++                 &Size,
++                 &Handle
++                 )
++          ))
++    {
++      return;
++    }
++
++    if (EFI_ERROR (gBS->HandleProtocol (Handle, &gEfiLoadedImageProtocolGuid, (VOID **)&Image)) ||
++        (Image->FilePath == NULL))
++    {
++      continue;
++    }
++
++    File = EfiGetNameGuidFromFwVolDevicePathNode (
++             (MEDIA_FW_VOL_FILEPATH_DEVICE_PATH *)Image->FilePath
++             );
++    if ((File != NULL) &&
++        (CompareGuid (File, &mUiAppFile) || CompareGuid (File, PcdGetPtr (PcdBootManagerMenuFile))))
++    {
++      HaltWatchdog ();
++    }
++  }
++}
++
++/**
++  Entry point.
++
++  @param[in]  ImageHandle  The image handle.
++  @param[in]  SystemTable  The system table.
++
++  @retval EFI_SUCCESS      The watchdog is handled.
++  @retval EFI_UNSUPPORTED  There is no running PCH TCO timer.
++**/
++EFI_STATUS
++EFIAPI
++TcoWatchdogDxeEntry (
++  IN EFI_HANDLE        ImageHandle,
++  IN EFI_SYSTEM_TABLE  *SystemTable
++  )
++{
++  EFI_EVENT  Event;
++
++  if ((PciRead16 (SMBUS_PCI + PCI_VENDOR_ID_OFFSET) != 0x8086) ||
++      ((PciRead32 (SMBUS_PCI + SMBUS_TCOCTL) & TCO_BASE_EN) == 0))
++  {
++    return EFI_UNSUPPORTED;
++  }
++
++  mTcoBase = (UINT16)(PciRead32 (SMBUS_PCI + SMBUS_TCOBASE) & 0xFFE0);
++  if ((mTcoBase == 0) || ((IoRead16 (mTcoBase + TCO1_CNT) & TCO1_TMR_HLT) != 0)) {
++    return EFI_UNSUPPORTED;
++  }
++
++  if (GetBootModeHob () == BOOT_ON_FLASH_UPDATE) {
++    HaltWatchdog ();
++    return EFI_SUCCESS;
++  }
++
++  EfiCreateProtocolNotifyEvent (
++    &gEfiLoadedImageProtocolGuid,
++    TPL_CALLBACK,
++    OnImageLoaded,
++    NULL,
++    &mImageRegistration
++    );
++  return EfiCreateEventReadyToBootEx (TPL_CALLBACK, OnReadyToBoot, NULL, &Event);
++}
+diff --git a/UefiPayloadPkg/TcoWatchdogDxe/TcoWatchdogDxe.inf b/UefiPayloadPkg/TcoWatchdogDxe/TcoWatchdogDxe.inf
+new file mode 100644
+index 0000000000..6a18859586
+--- /dev/null
++++ b/UefiPayloadPkg/TcoWatchdogDxe/TcoWatchdogDxe.inf
+@@ -0,0 +1,43 @@
++## @file
++#  Handle the boot watchdog that coreboot arms in the Intel PCH TCO timer.
++#
++#  SPDX-License-Identifier: BSD-2-Clause-Patent
++##
++
++[Defines]
++  INF_VERSION                    = 0x00010005
++  BASE_NAME                      = TcoWatchdogDxe
++  FILE_GUID                      = 6C2C1F2E-7A1B-4F8E-9F43-3B7D6A0E5C21
++  MODULE_TYPE                    = DXE_DRIVER
++  VERSION_STRING                 = 1.0
++  ENTRY_POINT                    = TcoWatchdogDxeEntry
++
++[Sources]
++  TcoWatchdogDxe.c
++
++[Packages]
++  MdePkg/MdePkg.dec
++  MdeModulePkg/MdeModulePkg.dec
++  UefiPayloadPkg/UefiPayloadPkg.dec
++
++[LibraryClasses]
++  BaseMemoryLib
++  CfrHelpersLib
++  DebugLib
++  DevicePathLib
++  HobLib
++  IoLib
++  PciLib
++  PcdLib
++  UefiBootServicesTableLib
++  UefiDriverEntryPoint
++  UefiLib
++
++[Protocols]
++  gEfiLoadedImageProtocolGuid
++
++[Pcd]
++  gEfiMdeModulePkgTokenSpaceGuid.PcdBootManagerMenuFile
++
++[Depex]
++  TRUE
+diff --git a/UefiPayloadPkg/UefiPayloadPkg.dsc b/UefiPayloadPkg/UefiPayloadPkg.dsc
+index 95ff1bea73..99935682df 100644
+--- a/UefiPayloadPkg/UefiPayloadPkg.dsc
++++ b/UefiPayloadPkg/UefiPayloadPkg.dsc
+@@ -1331,6 +1331,7 @@
+   MdeModulePkg/Universal/EbcDxe/EbcDxe.inf
+ 
+   UefiPayloadPkg/BlSupportDxe/BlSupportDxe.inf
++  UefiPayloadPkg/TcoWatchdogDxe/TcoWatchdogDxe.inf
+   UefiPayloadPkg/EcAcpiBatteryStatusDxe/EcAcpiBatteryStatusDxe.inf
+ 
+   #
+diff --git a/UefiPayloadPkg/UefiPayloadPkg.fdf b/UefiPayloadPkg/UefiPayloadPkg.fdf
+index 938253abe8..75dd049bb4 100644
+--- a/UefiPayloadPkg/UefiPayloadPkg.fdf
++++ b/UefiPayloadPkg/UefiPayloadPkg.fdf
+@@ -350,6 +350,7 @@ INF MdeModulePkg/Universal/DisplayEngineDxe/DisplayEngineDxe.inf
+ INF MdeModulePkg/Universal/TimeDateSettingsDxe/TimeDateSettingsDxe.inf
+ INF MdeModulePkg/Universal/EbcDxe/EbcDxe.inf
+ INF UefiPayloadPkg/BlSupportDxe/BlSupportDxe.inf
++INF UefiPayloadPkg/TcoWatchdogDxe/TcoWatchdogDxe.inf
+ INF UefiPayloadPkg/EcAcpiBatteryStatusDxe/EcAcpiBatteryStatusDxe.inf
+ 
+ INF MdeModulePkg/Universal/SmbiosDxe/SmbiosDxe.inf

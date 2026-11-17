@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 05:26:30 +0200
+Subject: [PATCH 19/25] SecurityPkg/SecureBootConfigDxe: Leave Custom mode
+ before booting
+
+The setup pages switch Secure Boot to Custom mode to enroll or delete
+keys, and since "SecurityPkg/SecureBootConfigDxe: Overhaul Secure Boot
+setup UI" they leave it there when the form closes. AuthVariableLib
+resets it to Standard at the next boot, but a boot option started from
+setup without a reset runs in Custom mode.
+
+In Custom mode AuthVariableLib accepts PK, KEK, db and dbx without a
+signature when UserPhysicalPresent() is true. UefiPayloadPkg links
+OvmfPkg's PlatformSecureLib, which always returns true, so after a key
+change in setup, the boot loader or OS booted next could replace db
+with its own certificate through SetVariable() until the next reset.
+
+Return to Standard mode at ReadyToBoot. The setup pages run before it
+(BDS doesn't signal ReadyToBoot for the boot manager menu) and keep
+their Custom mode for the whole visit, and nothing that is booted ever
+sees it. The variable is only written when it is set to Custom.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../SecureBootConfigDriver.c                  | 45 +++++++++++++++++++
+ 1 file changed, 45 insertions(+)
+
+diff --git a/SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigDriver.c b/SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigDriver.c
+index 46ddcab008..ac0ff08256 100644
+--- a/SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigDriver.c
++++ b/SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigDriver.c
+@@ -7,6 +7,45 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
+ **/
+ 
+ #include "SecureBootConfigImpl.h"
++#include <UefiSecureBoot.h>
++#include <Library/SecureBootVariableLib.h>
++
++STATIC EFI_EVENT  mReadyToBootEvent;
++
++/**
++  Leave Custom mode before booting.
++
++  In Custom mode the variable driver accepts unsigned PK, KEK, db and dbx while a user is
++  physically present, which this platform's PlatformSecureLib always reports. The setup pages
++  enter Custom mode to change keys, and it lasts until the next reset, so anything booted from
++  setup could change the keys too.
++
++  @param[in]  Event    The ReadyToBoot event.
++  @param[in]  Context  Not used.
++**/
++STATIC
++VOID
++EFIAPI
++LeaveCustomModeOnReadyToBoot (
++  IN EFI_EVENT  Event,
++  IN VOID       *Context
++  )
++{
++  UINT8  *SecureBootMode;
++
++  GetVariable2 (EFI_CUSTOM_MODE_NAME, &gEfiCustomModeEnableGuid, (VOID **)&SecureBootMode, NULL);
++  if (SecureBootMode == NULL) {
++    return;
++  }
++
++  if (*SecureBootMode == CUSTOM_SECURE_BOOT_MODE) {
++    if (EFI_ERROR (SetSecureBootMode (STANDARD_SECURE_BOOT_MODE))) {
++      DEBUG ((DEBUG_ERROR, "SecureBootConfigDxe: Cannot leave Custom mode\n"));
++    }
++  }
++
++  FreePool (SecureBootMode);
++}
+ 
+ /**
+   The entry point for SecureBoot configuration driver.
+@@ -75,6 +114,8 @@ SecureBootConfigDriverEntryPoint (
+     goto ErrorExit;
+   }
+ 
++  EfiCreateEventReadyToBootEx (TPL_CALLBACK, LeaveCustomModeOnReadyToBoot, NULL, &mReadyToBootEvent);
++
+   return EFI_SUCCESS;
+ 
+ ErrorExit:
+@@ -123,5 +164,9 @@ SecureBootConfigDriverUnload (
+ 
+   UninstallSecureBootConfigForm (PrivateData);
+ 
++  if (mReadyToBootEvent != NULL) {
++    gBS->CloseEvent (mReadyToBootEvent);
++  }
++
+   return EFI_SUCCESS;
+ }

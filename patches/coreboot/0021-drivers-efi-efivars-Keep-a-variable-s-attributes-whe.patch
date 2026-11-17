@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 03:15:29 +0200
+Subject: [PATCH 21/29] drivers/efi/efivars: Keep a variable's attributes when
+ rewriting it
+
+efi_fv_set_option() wrote every variable non-volatile, boot service and
+runtime accessible. The payload creates the option variables with the
+attributes it chose, for EDK2 from the CFR flags: runtime access only
+with CFR_OPTFLAG_RUNTIME. Once coreboot rewrote one, for example a board
+resetting a one-shot option, the OS could read and write it.
+
+Keep the attributes of the variable being replaced, and write a new one
+non-volatile and boot service only.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/drivers/efi/efivars.c | 23 +++++++++++++----------
+ 1 file changed, 13 insertions(+), 10 deletions(-)
+
+diff --git a/src/drivers/efi/efivars.c b/src/drivers/efi/efivars.c
+index 98a70d1985..579ad529ff 100644
+--- a/src/drivers/efi/efivars.c
++++ b/src/drivers/efi/efivars.c
+@@ -476,6 +476,7 @@ struct efi_find_compare_args {
+ 	uint32_t size;
+ 	void *data;
+ 	bool match;
++	uint32_t attributes;
+ };
+ 
+ static
+@@ -492,6 +493,7 @@ enum cb_err find_and_compare(struct region_device *rdev, VARIABLE_HEADER *hdr, s
+ 		return ret;
+ 
+ 	*stop = true;
++	fa->attributes = hdr->Attributes;
+ 	if (fa->size != hdr->DataSize) {
+ 		fa->match = false;
+ 		return CB_SUCCESS;
+@@ -781,7 +783,7 @@ static enum cb_err variable_write_sizes(const struct region_device *rdev, const
+ }
+ 
+ static enum cb_err write_auth_hdr(struct region_device *rdev, const EFI_GUID *guid,
+-				  const char *name, void *data, size_t size)
++				  const char *name, void *data, size_t size, uint32_t attributes)
+ {
+ 	AUTHENTICATED_VARIABLE_HEADER auth_hdr;
+ 	size_t name_size;
+@@ -806,9 +808,7 @@ static enum cb_err write_auth_hdr(struct region_device *rdev, const EFI_GUID *gu
+ 	memset(&auth_hdr, 0xff, sizeof(auth_hdr));
+ 
+ 	auth_hdr.StartId = VARIABLE_DATA;
+-	auth_hdr.Attributes = EFI_VARIABLE_NON_VOLATILE|
+-			      EFI_VARIABLE_BOOTSERVICE_ACCESS|
+-			      EFI_VARIABLE_RUNTIME_ACCESS;
++	auth_hdr.Attributes = attributes;
+ 	auth_hdr.NameSize = name_size;
+ 	auth_hdr.DataSize = size;
+ 	memcpy(&auth_hdr.VendorGuid, guid, sizeof(EFI_GUID));
+@@ -844,7 +844,8 @@ static enum cb_err write_auth_hdr(struct region_device *rdev, const EFI_GUID *gu
+ static enum cb_err write_hdr(struct region_device *rdev, const EFI_GUID *guid,
+ 			     const char *name,
+ 			     void *data,
+-			     size_t size)
++			     size_t size,
++			     uint32_t attributes)
+ {
+ 	VARIABLE_HEADER hdr;
+ 	size_t name_size;
+@@ -869,9 +870,7 @@ static enum cb_err write_hdr(struct region_device *rdev, const EFI_GUID *guid,
+ 	memset(&hdr, 0xff, sizeof(hdr));
+ 
+ 	hdr.StartId = VARIABLE_DATA;
+-	hdr.Attributes = EFI_VARIABLE_NON_VOLATILE|
+-			 EFI_VARIABLE_BOOTSERVICE_ACCESS|
+-			 EFI_VARIABLE_RUNTIME_ACCESS;
++	hdr.Attributes = attributes;
+ 	hdr.NameSize = name_size;
+ 	hdr.DataSize = size;
+ 	memcpy(&hdr.VendorGuid, guid, sizeof(EFI_GUID));
+@@ -909,6 +908,9 @@ static enum cb_err write_hdr(struct region_device *rdev, const EFI_GUID *guid,
+  * - writes size bytes read from the buffer pointed to by *data
+  * - rdev is the spi flash region to operate on
+  * - the FVH and variable store header must have been initialized by a third party
++ * - an existing variable keeps its attributes: the payload decides who may access it,
++ *   for example the OS through EFI_VARIABLE_RUNTIME_ACCESS. A new one is written
++ *   non-volatile and boot service only, out of the OS's reach.
+  */
+ enum cb_err efi_fv_set_option(const struct region_device *rdev,
+ 			      const EFI_GUID *guid,
+@@ -935,6 +937,7 @@ enum cb_err efi_fv_set_option(const struct region_device *rdev,
+ 	args.size = size;
+ 	args.match = false;
+ 	args.data = data;
++	args.attributes = EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS;
+ 
+ 	ret = walk_variables(&store_rdev, auth_format, find_and_compare, &args, NULL,
+ 			     CHECK_UNUSED_ALL);
+@@ -972,9 +975,9 @@ enum cb_err efi_fv_set_option(const struct region_device *rdev,
+ 	 */
+ 
+ 	if (auth_format)
+-		ret = write_auth_hdr(&store_rdev, guid, name, data, size);
++		ret = write_auth_hdr(&store_rdev, guid, name, data, size, args.attributes);
+ 	else
+-		ret = write_hdr(&store_rdev, guid, name, data, size);
++		ret = write_hdr(&store_rdev, guid, name, data, size, args.attributes);
+ 	if (ret != CB_SUCCESS)
+ 		return ret;
+ 

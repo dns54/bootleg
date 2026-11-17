@@ -1,0 +1,99 @@
+{
+  "nodes": {
+    "coreboot": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794786211,
+        "narHash": "sha256-EqEUVly/jBAxWJiR6q3oL4oUJumronn5agnZHVmYd9I=",
+        "ref": "refs/heads/main",
+        "rev": "f13a6c7a61a761559d719f2b2e2a0ae1f43ddeb9",
+        "revCount": 65838,
+        "submodules": true,
+        "type": "git",
+        "url": "https://review.coreboot.org/coreboot"
+      },
+      "original": {
+        "submodules": true,
+        "type": "git",
+        "url": "https://review.coreboot.org/coreboot"
+      }
+    },
+    "deguard": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794344887,
+        "narHash": "sha256-HM/OGrLGedaHBfeHw9DSD48WSd5Olv5J/w4/hKz1qGc=",
+        "ref": "refs/heads/main",
+        "rev": "669b5c7755b90d18576a46e3613afcf19f399207",
+        "revCount": 27,
+        "type": "git",
+        "url": "https://review.coreboot.org/deguard"
+      },
+      "original": {
+        "type": "git",
+        "url": "https://review.coreboot.org/deguard"
+      }
+    },
+    "edk2": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794773528,
+        "narHash": "sha256-PsETypmeBQXm6JV2ILanw8G8GWmCVXTIbtE/yNtfR1o=",
+        "ref": "refs/heads/uefipayload_2608",
+        "rev": "1a1f9ed2ad02907772b4e24fecdbc5b16ce1f01a",
+        "revCount": 36653,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/MrChromebox/edk2"
+      },
+      "original": {
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/MrChromebox/edk2"
+      }
+    },
+    "microcode": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794327783,
+        "narHash": "sha256-mEf3UwOX1JSb2ELgacj7Wmnm3HYEpFzAlCdgSmsnC7Y=",
+        "owner": "intel",
+        "repo": "Intel-Linux-Processor-Microcode-Data-Files",
+        "rev": "d71fe4e2f0f70a49ebbac7f2c7e915f181361974",
+        "type": "github"
+      },
+      "original": {
+        "owner": "intel",
+        "repo": "Intel-Linux-Processor-Microcode-Data-Files",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1794644783,
+        "narHash": "sha256-3GnIGIy15bMduoS9RnWqKTmsJLWThla42UFtm0S7+us=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "5d2b81a7a3be3e2f832879028e4d60abbf58e9a0",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "coreboot": "coreboot",
+        "deguard": "deguard",
+        "edk2": "edk2",
+        "microcode": "microcode",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

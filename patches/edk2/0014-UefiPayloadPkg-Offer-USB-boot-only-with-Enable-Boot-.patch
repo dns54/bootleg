@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:14:25 +0200
+Subject: [PATCH 14/25] UefiPayloadPkg: Offer USB boot only with Enable Boot
+ Support on
+
+Dell's setup has "Enable Boot Support" under USB Configuration, which
+keeps the USB ports working but stops the firmware from booting from
+USB storage. coreboot's usb_boot option (CFR) carries it.
+
+Drop USB boot options (a USB node in the device path) in the platform
+boot manager's refresh while the option is off.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../PlatformBootManager.c                      | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+index e125480f9b..d57a649287 100644
+--- a/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
++++ b/UefiPayloadPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+@@ -415,7 +415,8 @@ PlatformRegisterBootManagerEntryNotifyCallback (
+ 
+ /**
+   Adjust the boot options the boot manager enumerates. Network boot options exist only while the
+-  "Enable UEFI Network Stack" setup option is on.
++  "Enable UEFI Network Stack" setup option is on, USB ones only while "Enable Boot Support" is.
++  This only hides them: a Boot#### or BootNext that names a USB device still boots from it.
+ 
+   @param[in]  BootOptions              The enumerated boot options.
+   @param[in]  BootOptionsCount         Number of enumerated boot options.
+@@ -438,7 +439,9 @@ PlatformRefreshAllBootOptions (
+   EFI_BOOT_MANAGER_LOAD_OPTION  *Options;
+   EFI_DEVICE_PATH_PROTOCOL      *Node;
+   BOOLEAN                       IsNetwork;
++  BOOLEAN                       IsUsb;
+   BOOLEAN                       NetworkBoot;
++  BOOLEAN                       UsbBoot;
+   UINTN                         Index;
+   UINTN                         Count;
+   EFI_STATUS                    Status;
+@@ -449,19 +452,32 @@ PlatformRefreshAllBootOptions (
+   }
+ 
+   NetworkBoot = CfrOptionGetUint32 ("network_stack", FALSE) != 0;
++  UsbBoot     = CfrOptionGetUint32 ("usb_boot", TRUE) != 0;
+   Count       = 0;
+   for (Index = 0; Index < BootOptionsCount; Index++) {
+     IsNetwork = FALSE;
++    IsUsb     = FALSE;
+     for (Node = BootOptions[Index].FilePath; !IsDevicePathEnd (Node); Node = NextDevicePathNode (Node)) {
+       if ((DevicePathType (Node) == MESSAGING_DEVICE_PATH) && (DevicePathSubType (Node) == MSG_MAC_ADDR_DP)) {
+         IsNetwork = TRUE;
+       }
++
++      if ((DevicePathType (Node) == MESSAGING_DEVICE_PATH) &&
++          ((DevicePathSubType (Node) == MSG_USB_DP) || (DevicePathSubType (Node) == MSG_USB_CLASS_DP) ||
++           (DevicePathSubType (Node) == MSG_USB_WWID_DP)))
++      {
++        IsUsb = TRUE;
++      }
+     }
+ 
+     if (IsNetwork && !NetworkBoot) {
+       continue;
+     }
+ 
++    if (IsUsb && !UsbBoot) {
++      continue;
++    }
++
+     Status = EfiBootManagerInitializeLoadOption (
+                &Options[Count],
+                LoadOptionNumberUnassigned,

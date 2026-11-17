@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:09:16 +0200
+Subject: [PATCH 08/12] mb/dell/sklkbl_desktops: Add a boot watchdog
+
+A hang during boot, in memory training, DXE or the boot manager, leaves
+a headless machine stuck until someone power-cycles it.
+
+Arm the PCH TCO timer in the bootblock: it resets the system after 600 s
+(coreboot's OC watchdog default) unless something halts it, 1200 s
+before SMM is up. The "Watchdog Timer Support" option (Dell's name)
+picks how far it reaches:
+- Disabled.
+- Boot Only, the default: edk2 halts it at the first boot attempt, so
+  it covers everything up to there.
+- Boot and OS: edk2 restarts the countdown at the boot attempt and
+  leaves the timer running, so the OS must keep resetting it (on Linux,
+  iTCO_wdt does). Like Dell's option, but not the default: an OS
+  without a TCO driver would restart within 10 minutes.
+
+An S3 resume doesn't arm it: edk2, which halts it or hands it over,
+doesn't run on that path.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../dell/sklkbl_desktops/bootblock.c          | 28 +++++++++++++++++++
+ src/mainboard/dell/sklkbl_desktops/cfr.c      | 17 +++++++++++
+ 2 files changed, 45 insertions(+)
+
+diff --git a/src/mainboard/dell/sklkbl_desktops/bootblock.c b/src/mainboard/dell/sklkbl_desktops/bootblock.c
+index 2bb3d61628..3d4af9b80d 100644
+--- a/src/mainboard/dell/sklkbl_desktops/bootblock.c
++++ b/src/mainboard/dell/sklkbl_desktops/bootblock.c
+@@ -1,7 +1,12 @@
+ /* SPDX-License-Identifier: GPL-2.0-only */
+ 
+ #include <bootblock_common.h>
++#include <bootmode.h>
++#include <console/console.h>
+ #include <device/pnp_ops.h>
++#include <intelblocks/tco.h>
++#include <option.h>
++#include <soc/intel/common/tco.h>
+ #include <soc/gpio.h>
+ #include <superio/smsc/sch555x/sch555x.h>
+ #include "../../../include/variant/gpio.h"
+@@ -104,3 +109,26 @@ void bootblock_mainboard_early_init(void)
+ 	// Bootblock EC initialization is required for UART1 to work
+ 	sch555x_enable_serial(SERIAL_DEV, CONFIG_TTYS0_BASE);
+ }
++
++/*
++ * The TCO timer resets the system after two timeouts, or after one once SMM is up. edk2 halts
++ * it at the first boot attempt or leaves it to the OS (patches/edk2/0013).
++ */
++#define WATCHDOG_TICKS	1000	/* 0.6 s each: 600 s, coreboot's OC watchdog default */
++
++void bootblock_mainboard_init(void)
++{
++	const unsigned int mode = get_uint_option("watchdog", 1);
++	if (!mode)
++		return;
++	/* edk2, which halts the timer, doesn't run on S3 resume */
++	if (platform_is_resuming())
++		return;
++
++	tco_write_reg(TCO1_STS, TCO1_STS_TIMEOUT);
++	tco_write_reg(TCO2_STS, TCO2_STS_SECOND_TO);
++	tco_write_reg(TCO_TMR, WATCHDOG_TICKS);
++	tco_write_reg(TCO_RLD, 1);
++	tco_write_reg(TCO1_CNT, tco_read_reg(TCO1_CNT) & ~TCO1_TMR_HLT);
++	printk(BIOS_INFO, "Boot watchdog armed (%s)\n", mode == 2 ? "Boot and OS" : "Boot Only");
++}
+diff --git a/src/mainboard/dell/sklkbl_desktops/cfr.c b/src/mainboard/dell/sklkbl_desktops/cfr.c
+index ba6ea47819..ed1ff5bb4c 100644
+--- a/src/mainboard/dell/sklkbl_desktops/cfr.c
++++ b/src/mainboard/dell/sklkbl_desktops/cfr.c
+@@ -47,6 +47,22 @@ static const struct sm_object fan_full_speed = SM_DECLARE_BOOL({
+ 	.default_value	= false,
+ });
+ 
++static const struct sm_object watchdog = SM_DECLARE_ENUM({
++	.opt_name	= "watchdog",
++	.ui_name	= "Watchdog Timer Support",
++	.ui_helptext	= "Enable or disable the watchdog timer, which resets the system if it"
++			  " hangs. Boot Only: covers the firmware, up to the first boot"
++			  " attempt. Boot and OS: keeps the timer running into the OS, which"
++			  " must reset it regularly (on Linux, the iTCO_wdt driver), or the"
++			  " system restarts within 10 minutes.",
++	.default_value	= 1,
++	.values		= (const struct sm_enum_value[]) {
++				{ "Disabled",		0	},
++				{ "Boot Only",		1	},
++				{ "Boot and OS",	2	},
++				SM_ENUM_VALUE_END		},
++});
++
+ static const struct sm_object network_stack = SM_DECLARE_BOOL({
+ 	.opt_name	= "network_stack",
+ 	.ui_name	= "Enable UEFI Network Stack",
+@@ -79,6 +95,7 @@ static struct sm_obj_form chipset = {
+ 		&vtd,
+ 		&dell_igd_dvmt,
+ 		&dell_igd_aperture,
++		&watchdog,
+ 		NULL
+ 	},
+ };

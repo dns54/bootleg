@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 20:15:05 +0200
+Subject: [PATCH 06/12] mb/dell/sklkbl_desktops: Stay off after AC power loss
+ when configured
+
+The SCH5555 powers the board on as soon as AC power returns, whatever
+the PCH's "sleep after power failure" bit says, so "Restore AC power
+after loss" set to "Power off (S5)" or "Previous state" behaved like
+"Power on (S0)". After an AC cut with "Power off (S5)" the PCH reported
+both PWR_FLR and the sleep bit set, and nothing in PM1_STS showed a
+power button press.
+
+coreboot keeps that bit set exactly when the system should stay off
+after a power failure: always for "Power off (S5)", and from shutdown
+until the next boot for "Previous state". So when the power state saved
+in romstage has PWR_FLR and the bit set, clear PWR_FLR and power off
+again. Clearing PWR_FLR first means the next press of the power button
+boots.
+
+This runs after FSP-S: an S5 request from the bootblock was ignored
+and left the board hanging, since the PCH can't enter S5 before memory
+and silicon init.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/mainboard/dell/sklkbl_desktops/ramstage.c | 27 +++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/src/mainboard/dell/sklkbl_desktops/ramstage.c b/src/mainboard/dell/sklkbl_desktops/ramstage.c
+index 93dd73ead6..b62a78abac 100644
+--- a/src/mainboard/dell/sklkbl_desktops/ramstage.c
++++ b/src/mainboard/dell/sklkbl_desktops/ramstage.c
+@@ -4,9 +4,14 @@
+ #include <acpi/acpigen.h>
+ #include <bootstate.h>
+ #include <arch/cpuid.h>
++#include <console/console.h>
+ #include <cpu/x86/msr.h>
++#include <halt.h>
++#include <intelblocks/pmclib.h>
+ #include <option.h>
+ #include <soc/gpio.h>
++#include <soc/pm.h>
++#include <soc/pmc.h>
+ #include <soc/ramstage.h>
+ #include "../../../include/variant/gpio.h"
+ #include <superio/smsc/sch555x/sch555x.h>
+@@ -536,3 +541,25 @@ static void sch5555_ec_hwm_init(void *arg)
+ }
+ 
+ BOOT_STATE_INIT_ENTRY(BS_POST_DEVICE, BS_ON_EXIT, sch5555_ec_hwm_init, NULL);
++
++/*
++ * The SCH5555 powers the board on whenever AC power returns, ignoring the PCH's
++ * "sleep after power failure" bit, which coreboot sets while the system should
++ * stay off. Power off again, after FSP-S: the PCH can't enter S5 before memory
++ * and silicon init.
++ */
++static void sch5555_ac_recovery(void *arg)
++{
++	const struct chipset_power_state *ps = pmc_get_power_state();
++
++	if (!ps || !(ps->gen_pmcon_b & PWR_FLR) || !(ps->gen_pmcon_b & SLEEP_AFTER_POWER_FAIL))
++		return;
++
++	printk(BIOS_INFO, "AC power returned, staying off as configured\n");
++
++	/* Clear PWR_FLR, so the next power button press boots. */
++	pmc_clear_pmcon_pwr_failure_sts();
++	poweroff();
++}
++
++BOOT_STATE_INIT_ENTRY(BS_DEV_INIT_CHIPS, BS_ON_EXIT, sch5555_ac_recovery, NULL);

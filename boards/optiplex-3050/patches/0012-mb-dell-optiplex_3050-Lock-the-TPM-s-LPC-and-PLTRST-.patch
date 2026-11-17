@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 18:45:54 +0200
+Subject: [PATCH 12/12] mb/dell/optiplex_3050: Lock the TPM's LPC and PLTRST#
+ pads
+
+The TPM sits on LPC and is reset by PLTRST#. With these pads unlocked,
+software in the OS can switch them to GPIO mode, reset the TPM on its
+own and replay PCR values into it, which defeats measured boot and
+anything sealed to the PCRs:
+https://mkukri.xyz/2024/06/01/tpm-gpio-fail.html
+
+Lock the configuration of the LPC pads (LAD0-3, LFRAME#, SERIRQ,
+CLKRUN#, both LPC clocks) and PLTRST#, keeping the table's pad reset.
+Skylake locks pads through the sideband interface since a1d931c0938f
+("soc/intel/skylake: Select SOC_INTEL_COMMON_BLOCK_GPIO_LOCK_USING_SBI").
+With a Coffee Lake CPU that path also needs "soc/intel/skylake: Don't
+access MSR_BIOS_DONE", or ramstage halts with a #GP at the first locked
+pad.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ .../variants/optiplex_3050/gpio.c             | 28 ++++++++++++-------
+ 1 file changed, 18 insertions(+), 10 deletions(-)
+
+diff --git a/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/gpio.c b/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/gpio.c
+index be066941aa..4a1281abf9 100644
+--- a/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/gpio.c
++++ b/src/mainboard/dell/sklkbl_desktops/variants/optiplex_3050/gpio.c
+@@ -6,22 +6,30 @@
+ 
+ /* #ifndef __OPTIPLEX_3050_GPIO_H__ #define __OPTIPLEX_3050_GPIO_H__ */
+ 
++/*
++ * Lock the TPM's LPC pads and PLTRST#, so the OS can't turn them into GPIOs to reset the TPM
++ * and replay its PCRs. PAD_CFG_NF_LOCK() would change the pad reset to PWROK.
++ */
++#define PAD_CFG_NF_LOCKED(pad, pull, rst, func)				\
++	_PAD_CFG_STRUCT_LOCK(pad, PAD_RESET(rst) | PAD_FUNC(func),	\
++		PAD_PULL(pull) | PAD_IOSSTATE(TxLASTRxE), PAD_LOCK(LOCK_CONFIG))
++
+ static const struct pad_config gpio_table[] = {
+ 
+ 	/* ------- GPIO Community 0 ------- */
+ 
+ 	/* ------- GPIO Group GPP_A ------- */
+ 	PAD_CFG_NF(GPP_A0, UP_20K, PLTRST, NF1),			/* RCIN# */
+-	PAD_CFG_NF(GPP_A1, UP_20K, PLTRST, NF1),			/* LAD0 */
+-	PAD_CFG_NF(GPP_A2, UP_20K, PLTRST, NF1),			/* LAD1 */
+-	PAD_CFG_NF(GPP_A3, UP_20K, PLTRST, NF1),			/* LAD2 */
+-	PAD_CFG_NF(GPP_A4, UP_20K, PLTRST, NF1),			/* LAD3 */
+-	PAD_CFG_NF(GPP_A5, NONE, PLTRST, NF1),				/* LFRAME# */
+-	PAD_CFG_NF(GPP_A6, NONE, PLTRST, NF1),				/* SERIRQ */
++	PAD_CFG_NF_LOCKED(GPP_A1, UP_20K, PLTRST, NF1),			/* LAD0 */
++	PAD_CFG_NF_LOCKED(GPP_A2, UP_20K, PLTRST, NF1),			/* LAD1 */
++	PAD_CFG_NF_LOCKED(GPP_A3, UP_20K, PLTRST, NF1),			/* LAD2 */
++	PAD_CFG_NF_LOCKED(GPP_A4, UP_20K, PLTRST, NF1),			/* LAD3 */
++	PAD_CFG_NF_LOCKED(GPP_A5, NONE, PLTRST, NF1),				/* LFRAME# */
++	PAD_CFG_NF_LOCKED(GPP_A6, NONE, PLTRST, NF1),				/* SERIRQ */
+ 	PAD_CFG_GPI_TRIG_OWN(GPP_A7, NONE, DEEP, OFF, ACPI),		/* GPIO */
+-	PAD_CFG_NF(GPP_A8, NONE, DEEP, NF1),				/* CLKRUN# */
+-	PAD_CFG_NF(GPP_A9, NONE, PLTRST, NF1),				/* CLKOUT_LPC0 */
+-	PAD_CFG_NF(GPP_A10, NONE, PLTRST, NF1),				/* CLKOUT_LPC1 */
++	PAD_CFG_NF_LOCKED(GPP_A8, NONE, DEEP, NF1),				/* CLKRUN# */
++	PAD_CFG_NF_LOCKED(GPP_A9, NONE, PLTRST, NF1),				/* CLKOUT_LPC0 */
++	PAD_CFG_NF_LOCKED(GPP_A10, NONE, PLTRST, NF1),				/* CLKOUT_LPC1 */
+ 	PAD_CFG_NF(GPP_A11, UP_20K, DEEP, NF1),				/* PME# */
+ 	PAD_CFG_GPO(GPP_A12, 0, PLTRST),				/* GPIO */
+ 	PAD_CFG_NF(GPP_A13, NONE, PLTRST, NF1),				/* SUSWARN#/SUSPWRDNACK */
+@@ -50,7 +58,7 @@ static const struct pad_config gpio_table[] = {
+ 	PAD_CFG_GPO(GPP_B10, 0, PLTRST),				/* GPIO */
+ 	PAD_CFG_GPI_TRIG_OWN(GPP_B11, NONE, PLTRST, OFF, ACPI),		/* GPIO */
+ 	PAD_CFG_NF(GPP_B12, NONE, PLTRST, NF1),				/* SLP_S0# */
+-	PAD_CFG_NF(GPP_B13, NONE, PLTRST, NF1),				/* PLTRST# */
++	PAD_CFG_NF_LOCKED(GPP_B13, NONE, PLTRST, NF1),				/* PLTRST# */
+ 	PAD_CFG_NF(GPP_B14, DN_20K, PLTRST, NF1),			/* SPKR */
+ 	PAD_CFG_GPO(GPP_B15, 1, PLTRST),				/* GPIO */
+ 	PAD_CFG_GPO(GPP_B16, 1, PLTRST),				/* GPIO */

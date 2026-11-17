@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 18:00:00 +0200
+Subject: [PATCH 25/29] soc/intel/skylake: Don't access MSR_BIOS_DONE
+
+With MAINBOARD_SUPPORTS_COFFEELAKE_CPU, cpu_soc_is_in_untrusted_mode()
+reads MSR_BIOS_DONE (0x151). A Coffee Lake CPU on a 100/200-series
+board, such as the i3-9100T in a Dell OptiPlex 3050, doesn't have it,
+and the read raises #GP.
+
+Until SOC_INTEL_COMMON_BLOCK_GPIO_LOCK_USING_SBI was selected for
+Skylake, nothing called the function. Now gpio_non_smm_lock_pad() calls
+it for every pad locked from the ramstage pad tables, and ramstage
+halts:
+
+  CPU Index 0 - APIC 0 Unexpected Exception:13 @ 08:7aa47cb3 - Halting
+  ...
+  eax: 7aa87540 ebx: 7aa87540 ecx: 00000151 edx: 00000000
+
+The mode can never be on here: only cpu_soc_bios_done() enables it, and
+on this SoC nothing calls cpu_soc_bios_done() (only Alder Lake and
+Meteor Lake call before_post_cpus_init()). Return false without reading
+the MSR, as Skylake and Kaby Lake CPUs already got. Make
+cpu_soc_bios_done() a no-op too, so that a future caller can't raise
+the same #GP, and drop the now unused MSR definitions.
+
+Signed-off-by: Deividas Nastajus <16858119+dns54@users.noreply.github.com>
+---
+ src/soc/intel/skylake/cpu.c             | 21 +++++----------------
+ src/soc/intel/skylake/include/soc/msr.h |  3 ---
+ 2 files changed, 5 insertions(+), 19 deletions(-)
+
+diff --git a/src/soc/intel/skylake/cpu.c b/src/soc/intel/skylake/cpu.c
+index 9c82565784..e02f87815f 100644
+--- a/src/soc/intel/skylake/cpu.c
++++ b/src/soc/intel/skylake/cpu.c
+@@ -30,27 +30,16 @@
+ bool cpu_soc_is_in_untrusted_mode(void)
+ {
+ 	/*
+-	 * TODO: Add dynamic detection to identify if skylake SoC
+-	 * is in coffeelake board.
++	 * cpu_soc_bios_done() never enables the mode on this SoC. Don't read
++	 * MSR_BIOS_DONE to find out: Coffee Lake CPUs on 100/200-series boards
++	 * don't have it and raise #GP.
+ 	 */
+-	if (!CONFIG(MAINBOARD_SUPPORTS_COFFEELAKE_CPU))
+-		return false;
+-
+-	/* IA_UNTRUSTED_MODE is not supported in Sky Lake */
+-	msr_t msr = rdmsr(MSR_BIOS_DONE);
+-	return !!(msr.lo & ENABLE_IA_UNTRUSTED);
++	return false;
+ }
+ 
++/* IA untrusted mode isn't supported here, see above. */
+ void cpu_soc_bios_done(void)
+ {
+-	if (!CONFIG(MAINBOARD_SUPPORTS_COFFEELAKE_CPU))
+-		return;
+-
+-	msr_t msr;
+-
+-	msr = rdmsr(MSR_BIOS_DONE);
+-	msr.lo |= ENABLE_IA_UNTRUSTED;
+-	wrmsr(MSR_BIOS_DONE, msr);
+ }
+ 
+ /* Read on the BSP before the APs start, since soc_core_init() runs on every core */
+diff --git a/src/soc/intel/skylake/include/soc/msr.h b/src/soc/intel/skylake/include/soc/msr.h
+index a495799e9b..92e8215567 100644
+--- a/src/soc/intel/skylake/include/soc/msr.h
++++ b/src/soc/intel/skylake/include/soc/msr.h
+@@ -5,9 +5,6 @@
+ 
+ #include <intelblocks/msr.h>
+ 
+-/* IA_UNTRUSTED_MODE is not supported in Sky Lake */
+-#define MSR_BIOS_DONE		0x151
+-#define  ENABLE_IA_UNTRUSTED	(1 << 0)
+ #define MSR_LT_LOCK_MEMORY		0x2e7
+ #define MSR_UNCORE_PRMRR_PHYS_BASE	0x2f4
+ #define MSR_UNCORE_PRMRR_PHYS_MASK	0x2f5
