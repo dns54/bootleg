@@ -17,7 +17,6 @@ in
 runCommand "edk2-bootleg-src"
   {
     nativeBuildInputs = [ gitMinimal ];
-    # iPXE as configured for the driver above (GPL-2.0 source for the release).
     passthru.ipxeSource = ipxeDriver.overrideAttrs {
       name = "ipxe-bootleg-source";
       dontBuild = true;

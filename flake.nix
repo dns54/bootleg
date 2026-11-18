@@ -42,7 +42,6 @@
 
       bootleg = import ./nix {
         inherit lib pkgs inputs;
-        # Commit date as YYMMDDHHMM (UTC); fits the 32-bit ESRT version until 2042.
         release = builtins.substring 2 10 self.lastModifiedDate;
         rev = self.shortRev or self.dirtyShortRev or "unknown";
         sourceDate = self.lastModified;

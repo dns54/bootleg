@@ -1,37 +1,24 @@
 CONFIG_VENDOR_DELL=y
 CONFIG_BOARD_DELL_OPTIPLEX_3050=y
-# The whole BIOS region; me_cleaner leaves only 0x1000-0x111fff for the ME.
 CONFIG_CBFS_SIZE=0xEEE000
 CONFIG_HAVE_IFD_BIN=y
 CONFIG_IFD_BIN_PATH="descriptor.bin"
-# Keep the master locks set in default.nix; coreboot's default unlocks every region.
 CONFIG_DO_NOT_TOUCH_DESCRIPTOR_REGION=y
-# Fail the build if the descriptor regions and the flash layout disagree.
 CONFIG_VALIDATE_INTEL_DESCRIPTOR=y
 CONFIG_PAYLOAD_EDK2=y
 CONFIG_TPM_MEASURED_BOOT=y
 CONFIG_CONSOLE_SERIAL_RUNTIME=y
 # CONFIG_CONSOLE_SERIAL is not set
-# Nothing on this board reads POST codes (no display, no debug card slot).
 CONFIG_NO_POST=y
-# AC Recovery default: back on after a power cut, unless the machine was shut down.
 CONFIG_POWER_STATE_PREVIOUS_AFTER_FAILURE=y
-# Esc instead of F2 opens the boot manager and setup, as in MrChromebox builds.
 CONFIG_EDK2_BOOT_MANAGER_ESCAPE=y
-# No built-in UEFI Shell: from it anyone at the console can delete the admin password variable.
 # CONFIG_EDK2_HAVE_EFI_SHELL is not set
-# Signed UEFI capsule updates of the COREBOOT region, from the ESP (fwupd).
-# The version and the trusted certificate are set by nix/coreboot.nix.
 CONFIG_DRIVERS_EFI_FW_INFO=y
 CONFIG_DRIVERS_EFI_MAIN_FW_GUID="d0174e30-d179-4b38-8087-acbe44083a7a"
 CONFIG_DRIVERS_EFI_UPDATE_CAPSULES=y
 CONFIG_DRIVERS_EFI_CAPSULE_ON_DISK_SUPPORT=y
-# BIOS Lock: flash writable only from SMM. A setup option, on by default.
 CONFIG_BOOTMEDIA_SMM_BWP=y
 CONFIG_BOOTMEDIA_SMM_BWP_RUNTIME_OPTION=y
-# UEFI network stack and PXE boot, with iPXE as the NIC driver (patches/edk2/0012).
 CONFIG_EDK2_CUSTOM_BUILD_PARAMS="-D NETWORK_IPXE_DRIVER=TRUE"
-# Keep the 8254 running, as Dell does: the beep codes need it.
 CONFIG_USE_LEGACY_8254_TIMER=y
-# Chassis intrusion: keep the PCH's INTRUDER# latch for the board to report (board patch 0011)
 # CONFIG_SOC_INTEL_COMMON_BLOCK_SMM_TCO_INTRUDER_SMI_ENABLE is not set
