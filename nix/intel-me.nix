@@ -46,7 +46,6 @@ runCommand "me-${platform}${lib.optionalString (deguardDelta != null) "-${deguar
     ]
     ++ donor.nativeBuildInputs
     ++ lib.optional (deguardDelta != null) deguard;
-    meta.hydraPlatforms = [ ];
   }
   (
     donor.unpack donor.src

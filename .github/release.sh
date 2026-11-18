@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
-# Signs the capsule in ./result (nix build .#<board>-capsule) and writes the release files to
-# ./dist: the capsule, its fwupd cabinet, the fwupd metadata with its .jcat, and the complete
-# source with the third-party licence notice.
-# Usage: release.sh <board>. Needs CAPSULE_SIGNER (signer key + certificate, PEM) and
-# GITHUB_REPOSITORY (owner/repo).
 set -euo pipefail
 
 board=$1
@@ -24,16 +19,25 @@ openssl pkey -in "$work/signer.pem" -out "$work/signer.key"
 openssl x509 -in "$work/signer.pem" -out "$work/signer.crt"
 sign() { jcat-tool self-sign --kind sha256 "$@" && jcat-tool sign "$@" "$work/signer.crt" "$work/signer.key"; }
 
+gencap() {
+  PYTHONPATH=$edk2/BaseTools/Source/Python python3 "$edk2/BaseTools/Source/Python/Capsule/GenerateCapsule.py" \
+    --signer-private-cert "$work/signer.pem" --other-public-cert "$keys/capsule-intermediate.pem" \
+    --trusted-public-cert "$keys/capsule-root.pem" "$@"
+}
+
 mkdir -p dist
 cap=bootleg-$board-$version.cap
-PYTHONPATH=$edk2/BaseTools/Source/Python python3 \
-  "$edk2/BaseTools/Source/Python/Capsule/GenerateCapsule.py" --encode --output "dist/$cap" \
-  --guid "$guid" --capflag PersistAcrossReset --fw-version "$version" --lsv "$version" \
-  --signer-private-cert "$work/signer.pem" --other-public-cert "$keys/capsule-intermediate.pem" \
-  --trusted-public-cert "$keys/capsule-root.pem" \
-  result/coreboot.rmap.rom
+gencap --encode --output "dist/$cap" --guid "$guid" --capflag PersistAcrossReset \
+  --fw-version "$version" --lsv "$version" result/coreboot.rmap.rom
+# The firmware accepts only capsules that chain to capsule-root.pem. On a bad signature
+# GenerateCapsule --decode prints a warning and still exits 0, so check its output.
+gencap --decode --output "$work/check" "dist/$cap" > "$work/check.log"
+if grep -q 'verification failed' "$work/check.log"; then
+  cat "$work/check.log" >&2
+  exit 1
+fi
+cmp "$work/check.Payload.1.bin" result/coreboot.rmap.rom
 
-# Shared by the metainfo in the cabinet and the remote metadata.
 component() {
   cat <<EOF
   <component type="firmware">
@@ -87,5 +91,3 @@ src=$(nix build --no-link --print-out-paths ".#$board-capsule.source")
 tar -C "$src" -cf - --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$timestamp" \
   --transform "s|^\.|$name|" . | xz -T0 -6 > "dist/$name.tar.xz"
 cp docs/third-party.md dist/THIRD-PARTY.md
-
-echo "$version" > dist/version

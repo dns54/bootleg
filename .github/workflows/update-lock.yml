@@ -1,6 +1,4 @@
 # SPDX-License-Identifier: MIT
-# Weekly flake.lock update. Opens one pull request, or refreshes the open one, with what changed;
-# the build workflow then runs on it as the pull request's check.
 name: update-lock
 
 on:
@@ -29,7 +27,6 @@ jobs:
           commit-message: "flake.lock: Update"
           title: "flake.lock: Update"
           body-path: /tmp/body.md
-      # Pull requests opened with the workflow's token don't start workflows themselves.
       - if: steps.pr.outputs.pull-request-head-sha
         env:
           GH_TOKEN: ${{ github.token }}

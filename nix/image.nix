@@ -10,12 +10,7 @@
 let
   name = "${pname}-${coreboot.version}";
 in
-runCommand name
-  {
-    nativeBuildInputs = [ coreboot-utils ];
-    meta.hydraPlatforms = [ ];
-  }
-  ''
+runCommand name { nativeBuildInputs = [ coreboot-utils ]; } ''
     head -c ${flashSize} /dev/zero | tr '\0' '\377' > blank.rom
     dd if=${coreboot}/descriptor.bin of=blank.rom conv=notrunc status=none
     ifdtool -p ${platform} -i ME:${me} blank.rom -O me.rom

@@ -1,7 +1,4 @@
 # SPDX-License-Identifier: MIT
-# Builds the ME-less capsule build and pushes it to Cachix. On main it also signs a capsule and
-# publishes it with the fwupd metadata as a GitHub Release. Never build the full image here: it
-# holds the ME, which must not reach the cache or a release.
 name: build
 
 on:
@@ -33,9 +30,15 @@ jobs:
           CAPSULE_SIGNER: ${{ secrets.CAPSULE_SIGNER }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          v=$(<result/capsule-version)
+          # "Latest" is the newest release by date, so a re-run of an older commit would win.
+          latest=$(gh release view --json tagName -q .tagName 2>/dev/null || echo 0)
+          if [ "$v" -le "$latest" ]; then
+            echo "::notice::$v is not newer than the latest release $latest, not publishing"
+            exit 0
+          fi
           nix shell --inputs-from . nixpkgs#libjcat nixpkgs#gcab nixpkgs#zstd nixpkgs#python3 \
             nixpkgs#openssl nixpkgs#jq nixpkgs#gnutar nixpkgs#xz -c .github/release.sh optiplex-3050
-          v=$(<dist/version)
           gh release create "$v" --target "$GITHUB_SHA" --title "bootleg $v" \
             --notes "Built from $GITHUB_SHA." \
             dist/*.cap dist/*.cab dist/firmware.xml.zst dist/firmware.xml.zst.jcat \
