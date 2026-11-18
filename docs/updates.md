@@ -59,8 +59,12 @@ CAPSULE_SIGNER="$(<signer.pem)" GITHUB_REPOSITORY=<owner>/<repo> \
 - Chain: root (`keys/capsule-root.pem`, built into the ROM) → intermediate
   (`keys/capsule-intermediate.pem`) → signer, which signs both the capsule and the fwupd files
 - `signer.pem` holds the signer key and certificate. CI has it as the `CAPSULE_SIGNER` secret
-- The root and intermediate keys stay offline. A leaked signer is replaced with a new one from the
-  intermediate, without a reflash
+- The root and intermediate keys stay offline
+- A leaked signer can't be revoked: the firmware accepts any certificate under the root, and
+  doesn't check expiry. With it and root access, anyone can install their own capsule, even one
+  with a version high enough to block later updates. To recover, make a new root and chain, and
+  release firmware that trusts the new root, signed with the old chain. A machine stays exposed
+  until it runs that release
 
 ## Risks and limits
 
