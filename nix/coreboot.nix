@@ -49,7 +49,7 @@ let
       cp ${../docs/third-party.md} THIRD-PARTY.md
       chmod -R u+w .
 
-      rm -r 3rdparty/{amd_blobs,arm-trusted-firmware,qc_blobs,opensbi,stm}
+      rm -r 3rdparty/{amd_blobs,arm-trusted-firmware,qc_blobs,opensbi,stm,blobs} 3rdparty/vboot/tests
       find 3rdparty/fsp -maxdepth 1 -name '*FspBinPkg' ! -name KabylakeFspBinPkg -exec rm -r {} +
       rm -r $w/SecurityPkg/DeviceSecurity/SpdmLib/libspdm/os_stub/{openssllib,mbedtlslib} \
         $w/LvglPkg/Library/LvglLib/lvgl/{tests,docs,demos,examples} \
