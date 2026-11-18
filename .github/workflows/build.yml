@@ -42,4 +42,4 @@ jobs:
           gh release create "$v" --target "$GITHUB_SHA" --title "bootleg $v" \
             --notes "Built from $GITHUB_SHA." \
             dist/*.cap dist/*.cab dist/firmware.xml.zst dist/firmware.xml.zst.jcat \
-            dist/*-source.tar.xz dist/THIRD-PARTY.md
+            dist/*-source.tar.xz

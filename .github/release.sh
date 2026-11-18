@@ -90,4 +90,3 @@ name=bootleg-$board-$version-source
 src=$(nix build --no-link --print-out-paths ".#$board-capsule.source")
 tar -C "$src" -cf - --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$timestamp" \
   --transform "s|^\.|$name|" . | xz -T0 -6 > "dist/$name.tar.xz"
-cp docs/third-party.md dist/THIRD-PARTY.md
