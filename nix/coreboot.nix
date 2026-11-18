@@ -56,6 +56,11 @@ let
         $w/CryptoPkg/Library/OpensslLib/openssl/{test,fuzz} \
         $w/CryptoPkg/Library/MbedTlsLib/mbedtls/tests \
         $w/MdeModulePkg/Library/BrotliCustomDecompressLib/brotli/tests
+
+      if grep -rlaZF '$FPT' . | xargs -0r grep -LIF '$FPT' | grep .; then
+        echo "Intel ME firmware in the source" >&2
+        exit 1
+      fi
     '';
 
     dontConfigure = true;
